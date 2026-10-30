@@ -6,6 +6,12 @@ import { buildReport, type EntryLike, forkedAt, slimEntry, type UsageReport } fr
 const NEWLINE = 0x0a;
 const CHUNK_BYTES = 1024 * 1024;
 const FILES_MAX = 1000;
+/** Entries kept per log; a longer session is read from its newest entries, as opencode's reader caps its messages. */
+const ENTRIES_FILE_MAX = 50_000;
+/** Entries kept across every log, so a host with many long sessions stays bounded; an evicted log is read again when asked for. */
+const ENTRIES_TOTAL_MAX = 200_000;
+/** A line with no newline this long is dropped instead of held, so one corrupt write cannot grow the buffer without bound. */
+const CARRY_MAX_BYTES = 4 * 1024 * 1024;
 const EXTENSION = ".jsonl";
 
 /**
@@ -59,7 +65,13 @@ function consumeLine(state: FileState, line: string): void {
   if (entry) state.entries.push(entry);
 }
 
-function consume(state: FileState, bytes: Buffer): void {
+/** Drops the oldest entries past the per-file cap; the newest matter most for a live chip. */
+function trim(state: FileState, max: number): void {
+  const excess = state.entries.length - max;
+  if (excess > 0) state.entries.splice(0, excess);
+}
+
+function consume(state: FileState, bytes: Buffer, carryMax: number): void {
   // Split on the newline byte, never inside a character: UTF-8 never uses 0x0a within one.
   const buf = state.carry.length > 0 ? Buffer.concat([state.carry, bytes]) : bytes;
   let start = 0;
@@ -68,6 +80,7 @@ function consume(state: FileState, bytes: Buffer): void {
     start = end + 1;
   }
   state.carry = Buffer.from(buf.subarray(start));
+  if (state.carry.length > carryMax) state.carry = Buffer.alloc(0);
 }
 
 async function readFirstLine(path: string, length: number): Promise<string> {
@@ -81,7 +94,13 @@ async function readFirstLine(path: string, length: number): Promise<string> {
   }
 }
 
-async function readFrom(path: string, state: FileState, size: number): Promise<void> {
+interface Limits {
+  entriesFileMax: number;
+  entriesTotalMax: number;
+  carryMaxBytes: number;
+}
+
+async function readFrom(path: string, state: FileState, size: number, limits: Limits): Promise<void> {
   const handle = await open(path, "r");
   try {
     while (state.offset < size) {
@@ -90,7 +109,8 @@ async function readFrom(path: string, state: FileState, size: number): Promise<v
       const { bytesRead } = await handle.read(chunk, 0, length, state.offset);
       if (bytesRead === 0) break;
       state.offset += bytesRead;
-      consume(state, chunk.subarray(0, bytesRead));
+      consume(state, chunk.subarray(0, bytesRead), limits.carryMaxBytes);
+      trim(state, limits.entriesFileMax);
     }
   } finally {
     await handle.close();
@@ -104,16 +124,30 @@ const isMissing = (err: unknown): boolean => (err as NodeJS.ErrnoException).code
  * entries, and later reads parse only the bytes pi appended. A file that shrank
  * or whose first line changed (pi rewrote it) is read again from the start.
  */
-export function createPiSessions(opts: { dir: string }): PiSessions {
+export function createPiSessions(opts: { dir: string; limits?: Partial<Limits> }): PiSessions {
+  const limits: Limits = {
+    entriesFileMax: opts.limits?.entriesFileMax ?? ENTRIES_FILE_MAX,
+    entriesTotalMax: opts.limits?.entriesTotalMax ?? ENTRIES_TOTAL_MAX,
+    carryMaxBytes: opts.limits?.carryMaxBytes ?? CARRY_MAX_BYTES,
+  };
   const files = new Map<string, FileState>();
   const busy = new Map<string, Promise<FileState | null>>();
+
+  /** Entries held across every file; recomputed at a keep, which runs once per file read. */
+  function heldEntries(): number {
+    let total = 0;
+    for (const state of files.values()) total += state.entries.length;
+    return total;
+  }
 
   function keep(path: string, state: FileState): void {
     files.delete(path);
     files.set(path, state);
-    if (files.size > FILES_MAX) {
+    // Drop the least recently read logs first. The one just read is last, so it is evicted only when it is the only one left.
+    while ((files.size > FILES_MAX || heldEntries() > limits.entriesTotalMax) && files.size > 1) {
       const oldest = files.keys().next().value;
-      if (oldest !== undefined) files.delete(oldest);
+      if (oldest === undefined) break;
+      files.delete(oldest);
     }
   }
 
@@ -127,10 +161,14 @@ export function createPiSessions(opts: { dir: string }): PiSessions {
       return null;
     }
     let state = files.get(path);
-    if (state && info.size === state.offset && info.mtimeMs === state.mtimeMs) return state;
+    if (state && info.size === state.offset && info.mtimeMs === state.mtimeMs) {
+      // Touch the entry so eviction follows last use, not last change.
+      keep(path, state);
+      return state;
+    }
     if (state && (info.size < state.offset || (state.firstLine !== null && (await rewritten(path, state.firstLine))))) state = undefined;
     state ??= fresh();
-    if (info.size > state.offset) await readFrom(path, state, info.size);
+    if (info.size > state.offset) await readFrom(path, state, info.size, limits);
     state.mtimeMs = info.mtimeMs;
     keep(path, state);
     return state;

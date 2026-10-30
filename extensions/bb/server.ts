@@ -3,6 +3,7 @@ import { z } from "zod";
 import { budgetState, EXPENSIVE_MIN_USD, EXPENSIVE_MULTIPLE, shouldStop } from "../../src/budget.js";
 import { applyDiscounts, DISCOUNT_MAX, DISCOUNT_MIN, NO_DISCOUNTS, sameDiscounts } from "../../src/discounts.js";
 import { formatUsd, usageLabel } from "../../src/format.js";
+import { parsePriceOverrides, type PriceOverrides } from "../../src/prices.js";
 import { buildReport, type UsageReport } from "../../src/report.js";
 import type { UsageReply } from "../../src/wire.js";
 import { ALERT_CHANNEL } from "./alerts.js";
@@ -16,6 +17,7 @@ import { type Stored, storedSchema, usageEnvelopeSchema } from "./schema.js";
 import { createReportSource } from "./sources.js";
 import { withOwnedThreads, spawnedTurnCost } from "./family.js";
 import { checkDailyBudget, createSpendHandlers, type SpendDeps } from "./spend/server.js";
+import { ensureUsageSecret, sameToken, usageToken } from "./usage-auth.js";
 
 export { rpcContract } from "./contract.js";
 
@@ -100,6 +102,18 @@ export const SETTINGS = {
     description: `Off by default. When on, Burn notifies you after a prompt that costs at least ${EXPENSIVE_MULTIPLE} times the thread's median turn and at least ${formatUsd(EXPENSIVE_MIN_USD)}.`,
     default: false,
   },
+  priceOverrides: {
+    type: "string",
+    label: "Price overrides (JSON)",
+    description:
+      "Rates in dollars per million tokens for models the built-in list does not price, such as router aliases or contract rates: {\"model-id\": {\"input\": 3, \"output\": 15, \"cacheRead\": 0.3, \"cacheWrite\": 3.75}}. Cache reads and writes default to 0. An override replaces that model's built-in row, including any long-context tier. Applies to Claude Code and Codex threads, whose tokens Burn prices; pi and OpenCode threads use the cost their harness recorded.",
+    default: "",
+    experimental_multiline: true,
+    experimental_schema: z
+      .string()
+      .max(20_000, "Keep the overrides under 20,000 characters.")
+      .refine((text) => parsePriceOverrides(text) !== null, "Enter a JSON object of model ids to input and output rates, or leave it empty."),
+  },
   discount: {
     type: "number",
     label: "Discount (%)",
@@ -138,6 +152,16 @@ const ownBudgetSchema = z.object({ budget: z.number().finite().positive().nullab
 const stoppedSchema = z.object({ at: z.number() });
 
 const message = (err: unknown): string => (err instanceof Error ? err.message : String(err));
+const readPriceOverrides = (text: string | undefined): PriceOverrides => parsePriceOverrides(text ?? "") ?? {};
+
+/** Runs `fn` over `items`, `limit` at a time: a page over every thread must not fire every storage read at once. */
+async function eachLimit<T>(items: readonly T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) await fn(items[next++] as T);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 
 const sameSetting = (a: unknown, b: unknown): boolean => (a ?? null) === (b ?? null);
 
@@ -222,6 +246,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   const observed = new Map<string, UsageReport>();
   const stops = new Map<string, number | null>();
   let observing: Promise<void> = Promise.resolve();
+  let missingTokenWarned = false;
   let disposed = false;
   let dailyTimer: ReturnType<typeof setTimeout> | undefined;
   let warmTimer: ReturnType<typeof setTimeout> | undefined;
@@ -231,7 +256,16 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     clearTimeout(dailyTimer);
     clearTimeout(warmTimer);
   });
-  const source = createReportSource(bb, { onChange: changed, threads: directory });
+  const usageSecret = await ensureUsageSecret(bb);
+  let priceOverrides: PriceOverrides = readPriceOverrides((await settings.get()).priceOverrides);
+  const source = createReportSource(bb, { onChange: changed, threads: directory, overrides: () => priceOverrides });
+  bb.onDispose(() => source.dispose());
+  settings.onChange((next) => {
+    const overrides = readPriceOverrides(next.priceOverrides);
+    if (JSON.stringify(overrides) === JSON.stringify(priceOverrides)) return;
+    priceOverrides = overrides;
+    source.reprice();
+  });
   const loadedAt = Date.now();
 
   async function load(threadId: string): Promise<Stored | null> {
@@ -273,8 +307,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     const [logs, values] = await Promise.all([source.reportsOf(ids, { deadlineMs: HOST_WAIT_MS }), settings.get()]);
     const discounts = prices === "list" ? NO_DISCOUNTS : discountsOf(values);
     const out = new Map<string, Resolved>();
-    await Promise.all(
-      ids.map(async (threadId) => {
+    await eachLimit(ids, 32, async (threadId) => {
         const [stored, stopped, running] = await Promise.all([
           pinned?.threadId === threadId ? pinned.stored : load(threadId),
           stoppedOf(threadId),
@@ -297,8 +330,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
         );
         const fromPi = stored !== null && Date.now() - stored.at < PI_FRESH_MS;
         out.set(threadId, { report, source: fromPi ? "pi" : (log?.source ?? "log"), at: Math.max(log?.at ?? 0, stored?.at ?? 0) });
-      }),
-    );
+    });
     return out;
   }
 
@@ -470,7 +502,9 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     if (!(await source.harnessOf(threadId))?.perCall) return;
     const policy = policyFor(await ownBudget(threadId), values);
     if (!shouldStop(policy, prev.cost.total, next.cost.total)) return;
-    if ((await load(threadId)) !== null) return;
+    // A stored report older than PI_FRESH_MS means no extension is reporting now, so bb's stop owns the thread again.
+    const reportedByPi = await load(threadId);
+    if (reportedByPi !== null && Date.now() - reportedByPi.at < PI_FRESH_MS) return;
     try {
       await bb.sdk.threads.stop({ threadId });
     } catch (err) {
@@ -630,6 +664,15 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
 
   // The Burn pi extension reports each change here (extensions/pi/bb-report.ts) and applies the policy in the reply.
   bb.http.route("POST", "/usage", async (c) => {
+    // Reject traffic that carries no token before parsing up to 240 KB of body.
+    const token = c.req.header("x-burn-token") ?? "";
+    if (token === "") {
+      if (!missingTokenWarned) {
+        missingTokenWarned = true;
+        bb.log.warn("a pi session reported without a usage token; restart it to pick up BURN_BB_TOKEN. Its cost still comes from the session log.");
+      }
+      return c.json({ ok: false, error: "invalid usage token" } satisfies UsageReply, 401);
+    }
     const text = await c.req.text();
     if (Buffer.byteLength(text, "utf8") > REPORT_MAX_BYTES) return c.json({ ok: false, error: "usage report too large" } satisfies UsageReply, 413);
     let body: unknown;
@@ -641,6 +684,10 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     const envelope = usageEnvelopeSchema.safeParse(body);
     if (!envelope.success) return c.json({ ok: false, error: "invalid usage report" } satisfies UsageReply, 400);
     const { threadId, sentAt, report } = envelope.data;
+    // The token names the thread it was minted for, so one thread's pi cannot overwrite another thread's figures or read its budget.
+    if (!sameToken(token, usageToken(usageSecret, threadId))) {
+      return c.json({ ok: false, error: "invalid usage token" } satisfies UsageReply, 401);
+    }
     const policy = await policyOf(threadId);
     const held = await load(threadId);
     if (held && sentAt < held.sentAt) return c.json({ ok: true, policy } satisfies UsageReply);
@@ -659,11 +706,16 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     return c.json({ ok: true, policy } satisfies UsageReply);
   });
 
-  bb.providers.experimental_contributeEnv("pi", () => [
+  bb.providers.experimental_contributeEnv("pi", (context) => [
     {
       name: "BURN_BB_URL",
       value: { serverPath: `/api/v1/plugins/${bb.pluginId}/http/usage` },
       reason: "Where the Burn pi extension reports this thread's cost to the Burn plugin",
+    },
+    {
+      name: "BURN_BB_TOKEN",
+      value: usageToken(usageSecret, context.threadId),
+      reason: "Proof that this pi session reports for its own thread, minted by the Burn plugin",
     },
   ]);
 

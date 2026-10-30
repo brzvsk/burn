@@ -1,6 +1,32 @@
 # Changelog
 
-Notable changes to Burn, newest first. Burn follows [semantic versioning](https://semver.org). Releases from 0.4.0 on are tagged `vX.Y.Z` in this repository; earlier versions were not tagged. Each release's commit message has the full detail, including how the release was checked.
+Notable changes to Burn, newest first.
+
+Burn follows [semantic versioning](https://semver.org). Releases from 0.4.0 on are tagged `vX.Y.Z` in this repository; earlier versions were not tagged. Each release's commit message has the full detail, including how the release was checked.
+
+## 0.9.0 - 2026-10-30
+
+Subagent spend is counted correctly and shown in the existing Burn views, and the readers, storage and report endpoint are hardened after an audit. Native-agent support is by [Artur Karapetyan](https://github.com/architawr) ([#2](https://github.com/kalindudc/burn/pull/2)).
+
+- **Claude Code subagents are counted.** Burn reads Claude transcripts on the execution host, including nested subagent and workflow files. Repeated API-message snapshots replace one another, transcript totals replace the bb events that omit them, and copied fork history is excluded.
+- **Codex child usage no longer mixes with its parent.** Native child events can reuse the parent's provider session ID; Burn separates their cumulative counters by the turn that started them and keeps that mapping, so 100 + 80 + 220 totals 300 rather than 320.
+- **bb workflow workers count in their origin thread.** Workers are attached through lifecycle ownership, with deduplication and cycle protection, so their spend is in the family total and not only on the Burn page. A later independent prompt to an old worker stays in the family total but is not credited to a new prompt.
+- **Native-agent spend is visible without being counted twice.** The popover gains a Subagents line and the details a With agents KPI; the family table expands agent rows under a thread and its children. The amounts remain a subset of the thread totals.
+- **The popover explains where the family total comes from.** The large amount shows the calculation that separates the thread from its family, and the popover opens with that calculation closed.
+- **A malformed usage line can no longer take down a machine's figures.** Every token and cost field is coerced to a finite number, and a host validates each thread's report on its own, so one bad log drops that thread instead of failing the batch for up to 32 threads.
+- **Reports stay inside bb's KV cap.** Native-agent rows fold into an Other row past 50, as models and days already do; a report with thousands of subagents was reaching 588 KB. An older extension's oversized agent rows are folded too.
+- **Session-log memory is bounded.** Each log keeps its newest 50,000 entries, all logs together keep 200,000, and an unterminated line over 4 MB is dropped. An evicted log is read again when needed, and eviction follows last use rather than last change.
+- **A stale stored pi report no longer disables the server-side budget stop.** Burn defers to pi only while its last report is fresh.
+- **`POST /usage` requires a per-thread token.** Burn mints it with the plugin's secret and gives it to that thread's pi session, so one thread cannot write another thread's figures or read its budget. A missing token is rejected before the body is read. A pi session running before this update reports again after it restarts; its cost still shows from the session log.
+- **The Burn page reads storage in bounded batches**, not one KV read per thread at once.
+- **Price overrides.** A new JSON setting prices router aliases and contract models for Claude Code and Codex threads; unknown models can now show dollars instead of tokens. Changing the overrides reprices held and saved reports, including the fallback copy kept for an offline machine.
+- **OpenCode read failures are logged** once per reason instead of looking like a thread with no usage.
+- **New threads show their figures within seconds.** A thread's pi session id may reach bb after Burn's first lookup; Burn now treats that lookup as provisional, retries it after five seconds, and tells the UI to reread. Before, the thread could show nothing for up to the five-minute lookup cache, even while the model worked. The retry stops after about a minute so a thread whose session is named by its thread id cannot loop.
+- **The Where it went bar fills for a cheap thread.** Its segments used raw dollar amounts as flex-grow, and CSS leaves free space when those factors sum below 1, so a thread worth a few cents filled only a few percent of the bar. The bar now normalises the parts to shares, and the Burn page's token and cost bars use the same fix.
+- **Where it went explains a cost it cannot split.** A harness can report one total with no token kinds, which used to leave the bar's grey background visible with four $0.00 rows. That part now shows as an **Unsplit** slice and legend row with a note, and the bar is hidden until a thread has a priced call instead of greeting a new thread with an empty grey bar.
+- **The README's local install now says to run `npm rebuild better-sqlite3`** before tests, because `npm ci --ignore-scripts` leaves the plugin SDK's test host without its native binding.
+
+Checked with the full suite, the type check, a plugin build and a live install from the checkout: a report without a token was rejected while the session-log reader kept the cost current, and a reloaded plugin restored its settings. Settings, stored keys and the plugin database's tables are the same as in 0.8.3; the new Price overrides setting defaults to empty, and reports gain optional native-agent detail that older versions ignore.
 
 ## 0.8.3 - 2026-10-29
 

@@ -27,7 +27,7 @@ const costOf = (total: number) => sampleReport({ cost: { input: total, output: 0
 type Thread = { host: string | null; provider?: string; status?: "active" | "idle" | "error"; sessions?: string[] };
 
 /** A source over fake threads; each host answers with `costs[threadId]`, or throws when listed in `offline`. */
-function setup(threads: Record<string, Thread>, opts: { offline?: string[]; directory?: boolean; coverageNote?: string } = {}) {
+function setup(threads: Record<string, Thread>, opts: { offline?: string[]; directory?: boolean; coverageNote?: string; retryMs?: number; retryMax?: number } = {}) {
   const costs: Record<string, number> = {};
   const rows: EventRow[] = [];
   const calls: ExperimentalFakeHostRpcCall[] = [];
@@ -105,6 +105,8 @@ function setup(threads: Record<string, Thread>, opts: { offline?: string[]; dire
     onChange: (ids) => void changed.push(ids),
     now: () => now,
     ...(opts.directory ? { threads: createThreadDirectory(bb, { now: () => now }) } : {}),
+    ...(opts.retryMs === undefined ? {} : { retryMs: opts.retryMs }),
+    ...(opts.retryMax === undefined ? {} : { retryMax: opts.retryMax }),
   });
   const asked = (hostId?: string) =>
     calls
@@ -154,6 +156,47 @@ describe("createReportSource", () => {
       timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       threads: [{ threadId: id(100), sessionIds: ["pi_old", "pi_new", id(100)] }],
     });
+  });
+
+  it("does not persist a host read that a reprice overtook", async () => {
+    const t = id(1);
+    const s = setup({ [t]: { host: A } });
+    s.costs[t] = 1;
+    const release = s.hold();
+    const run = s.source.reportsOf([t]);
+    await vi.waitFor(() => expect(s.calls).toHaveLength(1));
+    s.source.reprice();
+    release();
+    await run;
+    expect(await s.bb.storage.kv.get(`log:${t}`)).toBeUndefined();
+    await s.source.reportsOf([t]);
+    expect(await s.bb.storage.kv.get(`log:${t}`)).toMatchObject({ report: { cost: { total: 1 } } });
+  });
+
+  it("looks a working thread up again soon when bb has not named its pi session yet", async () => {
+    const t = id(1);
+    const threads: Record<string, Thread> = { [t]: { host: A, status: "active", sessions: [] } };
+    const s = setup(threads, { retryMs: 10 });
+    s.costs[t] = 1;
+    await s.source.reportsOf([t]);
+    const first = s.calls.at(-1)?.input as { threads: { sessionIds: string[] }[] };
+    expect(first.threads[0]?.sessionIds).toEqual([t]);
+    threads[t] = { host: A, status: "active", sessions: [`pi_${t}`] };
+    await vi.waitFor(() => expect(s.changed.flat()).toContain(t));
+    await s.source.reportsOf([t]);
+    const next = s.calls.at(-1)?.input as { threads: { sessionIds: string[] }[] };
+    expect(next.threads[0]?.sessionIds).toContain(`pi_${t}`);
+  });
+
+  it("stops retrying a working thread that never gets a session identity", async () => {
+    const t = id(1);
+    const s = setup({ [t]: { host: A, status: "active", sessions: [] } }, { retryMs: 5, retryMax: 2 });
+    s.costs[t] = 1;
+    for (let i = 0; i < 4; i++) {
+      await s.source.reportsOf([t]);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+    expect(s.changed.flat().filter((changed) => changed === t)).toHaveLength(2);
   });
 
   it("keeps a report for a minute, then asks again", async () => {

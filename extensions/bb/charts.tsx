@@ -158,10 +158,13 @@ function turnSpan(points: CallPoint[]): string {
 /** Parts of one whole side by side, each as wide as its share. */
 export function StackedBar({ parts, className }: { parts: { key: string; value: number; className: string }[]; className?: string }): ReactNode {
   const shown = parts.filter((p) => p.value > 0);
+  // Normalise to shares: CSS leaves free space when flex-grow factors sum below 1,
+  // so raw dollar amounts left a cheap thread's bar mostly background.
+  const total = shown.reduce((sum, p) => sum + p.value, 0);
   return (
     <div className={cn("flex h-2 gap-0.5 overflow-hidden rounded-full bg-state-hover", className)} role="presentation">
       {shown.map((p) => (
-        <i key={p.key} data-part={p.key} className={cn("block h-full min-w-px", p.className)} style={{ flexGrow: p.value, flexBasis: 0 }} />
+        <i key={p.key} data-part={p.key} className={cn("block h-full min-w-px", p.className)} style={{ flexGrow: total > 0 ? p.value / total : 0, flexBasis: 0 }} />
       ))}
     </div>
   );

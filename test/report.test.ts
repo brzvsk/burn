@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
+  AGENTS_MAX,
   buildReport,
   CALL_TIME_BUCKETS,
   callTimeBucket,
@@ -9,6 +10,7 @@ import {
   forkedAt,
   HOUR_MS,
   HOURS_MAX,
+  OTHER_KEY,
   outputPerSec,
   PROMPT_MAX,
   promptExcerpt,
@@ -385,9 +387,38 @@ describe("slimEntry", () => {
     expect(buildReport([user(), slim as EntryLike], null).days[0]?.failed).toBe(1);
   });
 
+  it("turns a malformed usage field into 0 instead of NaN or text", () => {
+    const call = assistant(1);
+    const slim = slimEntry({
+      ...call,
+      message: { ...call.message, usage: { ...call.message.usage, input: "123", cost: { ...call.message.usage.cost, total: Number.NaN } } },
+    });
+    expect(slim).toMatchObject({ message: { usage: { input: 0, cost: { total: 0 } } } });
+    const report = buildReport([slim as EntryLike], null);
+    expect(report.tokens.input).toBe(0);
+    expect(Number.isFinite(report.cost.total)).toBe(true);
+  });
+
   it("is null for the session header and for anything that is not an entry", () => {
     expect(slimEntry({ type: "session", timestamp: "2026-10-18T12:00:00.000Z", parentSession: "/p" })).toBeNull();
     for (const value of [null, 1, "x", [], { type: "message" }, { timestamp: "t" }, { type: 1, timestamp: "t" }]) expect(slimEntry(value)).toBeNull();
+  });
+});
+
+describe("agents", () => {
+  it("folds rows past the cap into Other and keeps every row's cost", () => {
+    const entries = Array.from({ length: AGENTS_MAX + 10 }, (_, i) => ({ ...assistant(0.1), agentId: `agent-${i}` }));
+    const report = buildReport(entries, null);
+    expect(report.agents?.coverage).toBe("partial");
+    expect(report.agents?.rows).toHaveLength(AGENTS_MAX);
+    expect(report.agents?.rows.at(-1)?.id).toBe(OTHER_KEY);
+    const total = (report.agents?.rows ?? []).reduce((sum, row) => sum + row.cost.total, 0);
+    expect(total).toBeCloseTo(0.1 * (AGENTS_MAX + 10), 9);
+  });
+
+  it("keeps one row per agent when there is room", () => {
+    const report = buildReport([{ ...assistant(0.1), agentId: "a" }, { ...assistant(0.2), agentId: "b" }], null);
+    expect(report.agents?.rows.map((row) => row.id).sort()).toEqual(["a", "b"]);
   });
 });
 

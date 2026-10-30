@@ -30,13 +30,14 @@ export function createBbReporter(opts: {
     async report(report, mode) {
       const url = env.BURN_BB_URL ?? "";
       const threadId = env.BB_THREAD_ID ?? "";
+      const token = env.BURN_BB_TOKEN ?? "";
       if (mode !== "rpc" || !/^https?:\/\//.test(url) || !THREAD_ID.test(threadId)) return;
       const key = JSON.stringify(report);
       if (key === lastSent) return;
       try {
         const res = await send(url, {
           method: "POST",
-          headers: { "content-type": "application/json" },
+          headers: { "content-type": "application/json", ...(token === "" ? {} : { "x-burn-token": token }) },
           body: JSON.stringify({ threadId, sentAt: Date.now(), report }),
           signal: AbortSignal.timeout(TIMEOUT_MS),
         });

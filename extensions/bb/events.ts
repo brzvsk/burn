@@ -1,6 +1,7 @@
 import type { BbPluginApi } from "@get-bb/plugin-sdk";
+import type { PriceOverrides } from "../../src/prices.js";
 import { buildReport, type UsageReport } from "../../src/report.js";
-import { harnessOf } from "./harnesses.js";
+import { harnessOf, harnessWithPrices } from "./harnesses.js";
 import { addRows, type EventRow, type Ledger, type LedgerRecord, type LedgerState, ledgerEntries, USAGE_EVENTS } from "./ledger.js";
 
 /** bb's largest page of thread events. */
@@ -19,6 +20,8 @@ export interface EventReader {
   reportOf(threadId: string, providerId: string): Promise<{ report: UsageReport; at: number } | null>;
   /** Read the thread again the next time it is asked for. */
   invalidate(threadId: string): void;
+  /** Rebuild every held report, as after a price change. */
+  invalidateAll(): void;
   forget(threadId: string): Promise<void>;
 }
 
@@ -40,9 +43,9 @@ function remember<V>(map: Map<string, V>, key: string, value: V): void {
   }
 }
 
-function reportFrom(ledger: Ledger, providerId: string): UsageReport | null {
+function reportFrom(ledger: Ledger, providerId: string, overrides: PriceOverrides): UsageReport | null {
   if (!ledger.records.some((r) => r.kind !== "prompt")) return null;
-  return buildReport(ledgerEntries(ledger, providerId, harnessOf(providerId)), null);
+  return buildReport(ledgerEntries(ledger, providerId, harnessWithPrices(providerId, overrides)), null);
 }
 
 /**
@@ -52,11 +55,16 @@ function reportFrom(ledger: Ledger, providerId: string): UsageReport | null {
  * a second when a thread has new events; `onChange` names the threads whose
  * figures changed.
  */
-export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: string[]): void; now?: () => number }): EventReader {
+export function createEventReader(
+  bb: BbPluginApi,
+  opts: { onChange(threadIds: string[]): void; now?: () => number; overrides?: () => PriceOverrides },
+): EventReader {
   const now = opts.now ?? Date.now;
   const held = new Map<string, Held>();
   const chains = new Map<string, Promise<unknown>>();
   let migrated = false;
+  // Bumped by invalidateAll, so a read that started before a price change does not cache its old-price figures.
+  let generation = 0;
 
   function db() {
     const handle = bb.storage.database();
@@ -67,7 +75,7 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
     return handle;
   }
 
-  function load(threadId: string, providerId: string): Held {
+  function load(threadId: string, providerId: string, overrides: PriceOverrides): Held {
     const handle = db();
     const row = handle.prepare("SELECT state FROM usage_ledgers WHERE thread_id = ?").get(threadId) as { state: string } | undefined;
     const records = (handle.prepare("SELECT record FROM usage_records WHERE thread_id = ? ORDER BY n").all(threadId) as { record: string }[]).map(
@@ -75,7 +83,7 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
     );
     const state: LedgerState = row ? (JSON.parse(row.state) as LedgerState) : { afterSeq: null, at: null, model: null, sessions: {} };
     const ledger = { state, records };
-    return { ledger, report: reportFrom(ledger, providerId), checkedAt: Number.NEGATIVE_INFINITY, dirty: true };
+    return { ledger, report: reportFrom(ledger, providerId, overrides), checkedAt: Number.NEGATIVE_INFINITY, dirty: true };
   }
 
   function save(threadId: string, ledger: Ledger, from: number): void {
@@ -106,8 +114,9 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
     }
   }
 
-  async function readNow(threadId: string, providerId: string): Promise<{ got: Held; changed: boolean }> {
-    const got = held.get(threadId) ?? load(threadId, providerId);
+  async function readNow(threadId: string, providerId: string, overrides: PriceOverrides): Promise<{ got: Held; changed: boolean }> {
+    const startedAt = generation;
+    const got = held.get(threadId) ?? load(threadId, providerId, overrides);
     const rows = await newRows(threadId, got.ledger.state.afterSeq);
     const from = got.ledger.records.length;
     const added = addRows(got.ledger, rows, harnessOf(providerId));
@@ -120,16 +129,18 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
         throw err;
       }
     }
-    if (added !== null) got.report = reportFrom(got.ledger, providerId);
+    if (added !== null) got.report = reportFrom(got.ledger, providerId, overrides);
     got.checkedAt = now();
     got.dirty = false;
-    remember(held, threadId, got);
+    // A price change during this read means its figures are stale; leave the cache empty for the next read to rebuild.
+    if (generation === startedAt) remember(held, threadId, got);
+    else got.dirty = true;
     return { got, changed: added !== null };
   }
 
   /** Reads of one thread run one at a time, so none folds the same events twice. */
-  function read(threadId: string, providerId: string): Promise<{ got: Held; changed: boolean }> {
-    const run = (chains.get(threadId) ?? Promise.resolve()).then(() => readNow(threadId, providerId));
+  function read(threadId: string, providerId: string, overrides: PriceOverrides): Promise<{ got: Held; changed: boolean }> {
+    const run = (chains.get(threadId) ?? Promise.resolve()).then(() => readNow(threadId, providerId, overrides));
     const tail = run.catch(() => undefined);
     chains.set(threadId, tail);
     void tail.then(() => {
@@ -141,7 +152,7 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
   bb.events.on("experimental_thread.events", async ({ thread }) => {
     if (harnessOf(thread.providerId).reader !== "events") return;
     try {
-      const { changed } = await read(thread.id, thread.providerId);
+      const { changed } = await read(thread.id, thread.providerId, opts.overrides?.() ?? {});
       if (changed) opts.onChange([thread.id]);
     } catch (err) {
       bb.log.warn(`reading the usage bb recorded for ${thread.id} failed: ${message(err)}`);
@@ -150,10 +161,11 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
 
   return {
     async reportOf(threadId, providerId) {
+      const overrides = opts.overrides?.() ?? {};
       let got = held.get(threadId);
       if (got === undefined || got.dirty || now() - got.checkedAt >= REPORT_TTL_MS) {
         try {
-          got = (await read(threadId, providerId)).got;
+          got = (await read(threadId, providerId, overrides)).got;
         } catch (err) {
           bb.log.warn(`reading the usage bb recorded for ${threadId} failed, so Burn shows the last figures it read: ${message(err)}`);
           got = held.get(threadId);
@@ -165,6 +177,10 @@ export function createEventReader(bb: BbPluginApi, opts: { onChange(threadIds: s
     invalidate(threadId) {
       const got = held.get(threadId);
       if (got) got.dirty = true;
+    },
+    invalidateAll() {
+      generation++;
+      held.clear();
     },
     async forget(threadId) {
       held.delete(threadId);

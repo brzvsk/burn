@@ -4,7 +4,8 @@ import { sampleReport } from "../helpers.js";
 
 const URL_OK = "http://127.0.0.1:38886/api/v1/plugins/burn/http/usage";
 const THREAD = "thr_abc123def4";
-const env = { BURN_BB_URL: URL_OK, BB_THREAD_ID: THREAD };
+const TOKEN = "b".repeat(64);
+const env = { BURN_BB_URL: URL_OK, BB_THREAD_ID: THREAD, BURN_BB_TOKEN: TOKEN };
 const ok = () => new Response(JSON.stringify({ ok: true }), { status: 200 });
 
 describe("createBbReporter", () => {
@@ -29,6 +30,7 @@ describe("createBbReporter", () => {
     expect(url).toBe(URL_OK);
     expect(init.method).toBe("POST");
     expect((init.headers as Record<string, string>)["content-type"]).toBe("application/json");
+    expect((init.headers as Record<string, string>)["x-burn-token"]).toBe(TOKEN);
     const body = JSON.parse(init.body as string);
     expect(body.threadId).toBe(THREAD);
     expect(typeof body.sentAt).toBe("number");

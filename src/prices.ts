@@ -101,6 +101,41 @@ export const OPENAI_CODEX_PRICES: PriceTable = {
   },
 };
 
+/** Per-model rates from Burn's settings, laid over the built-in table. */
+export type PriceOverrides = Readonly<Record<string, PriceRow>>;
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+const rate = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 100_000;
+
+/**
+ * The JSON in the Price overrides setting: model id to dollars per million tokens.
+ * Input and output are required; cache reads and writes default to 0. Empty text is no overrides; null is invalid.
+ */
+export function parsePriceOverrides(text: string): PriceOverrides | null {
+  const trimmed = text.trim();
+  if (trimmed === "") return {};
+  let value: unknown;
+  try {
+    value = JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+  if (!isRecord(value)) return null;
+  const out: Record<string, PriceRow> = {};
+  for (const [id, row] of Object.entries(value)) {
+    if (id === "" || id.length > 200 || !isRecord(row)) return null;
+    const { input, output, cacheRead = 0, cacheWrite = 0 } = row;
+    if (!rate(input) || !rate(output) || !rate(cacheRead) || !rate(cacheWrite)) return null;
+    out[id] = { input, output, cacheRead, cacheWrite };
+  }
+  return out;
+}
+
+/** `table` with the settings' rates in place of its own, for the models they name. */
+export function withPrices(table: PriceTable, overrides: PriceOverrides): PriceTable {
+  return Object.keys(overrides).length === 0 ? table : { ...table, ...overrides };
+}
+
 /** A model's prices: by its id, else by its id without a trailing bracket such as "claude-opus-5-5[1m]". */
 export function priceOf(table: PriceTable, model: string): PriceRow | null {
   for (const id of [model, model.replace(/\[[^\]]*\]$/, "")]) if (Object.hasOwn(table, id)) return table[id] as PriceRow;

@@ -26,10 +26,10 @@ const headerOf = (id: string, timestamp = "2026-10-18T12:00:00.000Z", extra: Rec
 const line = (entry: unknown): string => `${JSON.stringify(entry)}\n`;
 const stamped = (iso: string) => <T extends { timestamp: string }>(entry: T): T => ({ ...entry, timestamp: iso });
 
-function setup() {
+function setup(limits?: { entriesFileMax?: number; entriesTotalMax?: number; carryMaxBytes?: number }) {
   const dir = mkdtempSync(join(tmpdir(), "burn-host-"));
   dirs.push(dir);
-  const sessions = createPiSessions({ dir });
+  const sessions = createPiSessions({ dir, ...(limits ? { limits } : {}) });
   const path = (id: string) => sessionFile(dir, id);
   const write = (id: string, entries: unknown[], header: unknown = headerOf(id)): string => {
     writeFileSync(path(id), [header, ...entries].map(line).join(""));
@@ -161,6 +161,24 @@ describe("createPiSessions", () => {
     await s.cost("pi_one");
     rmSync(file);
     expect(await s.sessions.reportOf(["pi_one"], ZONE)).toBeNull();
+  });
+
+  it("keeps the newest entries when a log passes the per-file cap", async () => {
+    const s = setup({ entriesFileMax: 5 });
+    s.write("pi_one", Array.from({ length: 10 }, (_, i) => user(`m${i}`)));
+    const got = await s.sessions.reportOf(["pi_one"], ZONE);
+    expect(got?.report.turnCount).toBe(5);
+    expect(got?.report.turns.at(-1)?.prompt).toBe("m9");
+  });
+
+  it("turns a malformed usage field into a finite number", async () => {
+    const s = setup();
+    const call = assistant(1.25);
+    const bad = { ...call, message: { ...call.message, usage: { ...call.message.usage, input: "oops" } } };
+    s.write("pi_one", [user(), bad]);
+    const got = await s.sessions.reportOf(["pi_one"], ZONE);
+    expect(got?.report.tokens.input).toBe(0);
+    expect(got?.report.cost.total).toBeCloseTo(1.25);
   });
 
   it("names the session of a changed path, for .jsonl files only", () => {

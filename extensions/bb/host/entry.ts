@@ -6,6 +6,7 @@ import { CHANGED_MAX, hostContract, hostSignals } from "./contract.js";
 import { createClaudeSessions, claudeProjectsDir } from "./claude-sessions.js";
 import { createOpencodeDb, opencodeDbPath } from "./opencode-db.js";
 import { createPiSessions, sessionDir } from "./pi-sessions.js";
+import { usageReportSchema } from "../schema.js";
 
 type Context = ExperimentalHostRpcContext<typeof hostSignals>;
 
@@ -41,6 +42,8 @@ export function createHostEntry(opts: { dir: string; opencodeDb?: string; openco
   const watchWaitMs = opts.watchWaitMs ?? WATCH_WAIT_MS;
   let watch: Promise<ExperimentalHostWatchSubscription | null> | null = null;
   let live: ExperimentalHostWatchSubscription | null = null;
+  // One bad log should cost its own thread's figures, not the batch's; the warning is once per thread so a live read does not flood the log.
+  const warned = new Set<string>();
 
   async function onEvent(event: ExperimentalHostWatchEvent, context: Context): Promise<void> {
     if (event.kind === "watch-error") {
@@ -97,15 +100,24 @@ export function createHostEntry(opts: { dir: string; opencodeDb?: string; openco
     contract: hostContract,
     experimental_signals: hostSignals,
     handlers: {
-      reports: async ({ harness, threads, timeZone }, context) => {
+      reports: async ({ harness, threads, timeZone, prices }, context) => {
         if (harness === "pi") await ensureWatch(context);
         const reports = [];
         for (const { threadId, sessionIds, since, parentSessionIds } of threads) {
           context.signal.throwIfAborted();
           const got = harness === "claude"
-              ? await claude.reportOf(sessionIds, timeZone, { since, parentSessionIds })
+              ? await claude.reportOf(sessionIds, timeZone, { since, parentSessionIds, prices })
               : harness === "opencode" ? await opencode.reportOf(sessionIds, timeZone) : await sessions.reportOf(sessionIds, timeZone);
-          reports.push({ threadId, report: got?.report ?? null, at: got?.at ?? null });
+          // Validate per report, so one malformed report is dropped instead of failing the whole batch at the RPC boundary.
+          const parsed = got?.report == null ? null : usageReportSchema.safeParse(got.report);
+          if (parsed !== null && !parsed.success) {
+            if (!warned.has(threadId)) {
+              if (warned.size > 500) warned.clear();
+              warned.add(threadId);
+              console.warn(`[burn] dropping an invalid ${harness} report for ${threadId}: ${parsed.error.issues[0]?.message ?? "invalid report"}`);
+            }
+          }
+          reports.push({ threadId, report: parsed?.success ? parsed.data : null, at: parsed?.success ? (got?.at ?? null) : null });
         }
         return { dir: opts.dir, reports };
       },

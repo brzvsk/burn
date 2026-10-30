@@ -73,10 +73,25 @@ describe("StackedBar and MiniBars", () => {
       />,
     );
     const parts = [...container.querySelectorAll("[data-part]")] as HTMLElement[];
-    expect(parts.map((p) => [p.dataset.part, p.style.flexGrow])).toEqual([
-      ["a", "3"],
-      ["c", "1"],
+    expect(parts.map((p) => [p.dataset.part, Number(p.style.flexGrow)])).toEqual([
+      ["a", 0.75],
+      ["c", 0.25],
     ]);
+  });
+
+  it("fills the bar even when the parts are small dollar amounts", () => {
+    const { container } = render(
+      <StackedBar
+        parts={[
+          { key: "a", value: 0.03, className: "bg-success" },
+          { key: "b", value: 0.01, className: "bg-attention" },
+        ]}
+      />,
+    );
+    const parts = [...container.querySelectorAll("[data-part]")] as HTMLElement[];
+    const shares = parts.map((p) => Number(p.style.flexGrow));
+    expect(shares.reduce((sum, n) => sum + n, 0)).toBeCloseTo(1);
+    expect(shares).toEqual([0.75, 0.25]);
   });
 
   it("scales per-call bars to the largest and marks the hot one", () => {

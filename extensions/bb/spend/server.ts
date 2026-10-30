@@ -131,7 +131,8 @@ const parse = (raw: unknown): Stored | null => {
 /** Every stored report entry, unparsed. */
 async function readEntries(bb: BbPluginApi): Promise<{ key: string; raw: unknown }[]> {
   const keys = await bb.storage.kv.list(REPORT_PREFIX);
-  const raws = await Promise.all(keys.map((key) => bb.storage.kv.get<unknown>(key)));
+  // A page can cover thousands of threads; a bounded read pool keeps it from firing every KV call at once.
+  const raws = await mapLimit(keys, 32, (key) => bb.storage.kv.get<unknown>(key));
   return keys.flatMap((key, i) => (raws[i] === undefined ? [] : [{ key, raw: raws[i] }]));
 }
 

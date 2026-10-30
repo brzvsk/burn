@@ -83,6 +83,8 @@ npm run typecheck
 bb plugin build
 ```
 
+If you installed with `npm ci --ignore-scripts` (the local-checkout install above), run `npm rebuild better-sqlite3` before `npm test`. The plugin SDK's test host uses its native binding, and without the rebuild 16 tests fail on a fresh checkout.
+
 The shared report, formatting and budget code is in `src/`. The pi extension is in `extensions/pi`, and the bb plugin is in `extensions/bb`. `test/layout.test.ts` keeps the halves from importing each other's dependencies.
 
 The screenshots come from a sandboxed bb and pi with made-up projects and threads.
@@ -90,6 +92,8 @@ The screenshots come from a sandboxed bb and pi with made-up projects and thread
 ## Credits
 
 Support for OpenCode threads, which Burn reads from opencode's own database, is by [Nikolai Berezovskii](https://github.com/brzvsk) ([#1](https://github.com/kalindudc/burn/pull/1)).
+
+Subagent accounting, which reads Claude Code transcripts and separates Codex child counters, is by [Artur Karapetyan](https://github.com/architawr) ([#2](https://github.com/kalindudc/burn/pull/2)).
 
 ## License
 

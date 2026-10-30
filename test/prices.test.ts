@@ -1,7 +1,7 @@
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { OPENAI_CODEX_MODELS } from "@earendil-works/pi-ai/providers/openai-codex.models";
 import { describe, expect, it } from "vitest";
-import { ANTHROPIC_PRICES, listCost, OPENAI_CODEX_PRICES, priceOf } from "../src/prices.js";
+import { ANTHROPIC_PRICES, listCost, OPENAI_CODEX_PRICES, parsePriceOverrides, priceOf, withPrices } from "../src/prices.js";
 
 const chatCosts = (models: Record<string, { id: string; type?: string; cost: unknown }>) =>
   Object.fromEntries(
@@ -30,6 +30,28 @@ describe("priceOf", () => {
     expect(priceOf(ANTHROPIC_PRICES, "claude-opus-5-5")).toBe(ANTHROPIC_PRICES["claude-opus-5-5"]);
     expect(priceOf(ANTHROPIC_PRICES, "claude-opus-5-5[1m]")).toBe(ANTHROPIC_PRICES["claude-opus-5-5"]);
     expect(priceOf(OPENAI_CODEX_PRICES, "shopify/auto")).toBeNull();
+  });
+});
+
+describe("price overrides", () => {
+  it("reads model rates from JSON, defaulting cache rates to 0", () => {
+    expect(parsePriceOverrides("")).toEqual({});
+    expect(parsePriceOverrides('{"shop/auto":{"input":1,"output":2}}')).toEqual({
+      "shop/auto": { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+    });
+  });
+
+  it("rejects anything that is not a complete rate object", () => {
+    for (const text of ["x", "[]", '{"m":{"input":1}}', '{"m":{"input":-1,"output":2}}', '{"m":{"input":1,"output":"2"}}', '{"":{"input":1,"output":2}}']) {
+      expect(parsePriceOverrides(text), text).toBeNull();
+    }
+  });
+
+  it("lays overrides over a list and leaves the other models alone", () => {
+    const table = withPrices(ANTHROPIC_PRICES, { "claude-opus-5-5": { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } });
+    expect(priceOf(table, "claude-opus-5-5")).toEqual({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+    expect(priceOf(table, "claude-sonnet-5")).toBe(ANTHROPIC_PRICES["claude-sonnet-5"]);
+    expect(withPrices(ANTHROPIC_PRICES, {})).toBe(ANTHROPIC_PRICES);
   });
 });
 

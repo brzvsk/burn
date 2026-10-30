@@ -22,7 +22,13 @@ Burn checks the daily budget at most every 30 seconds, so its notification can a
 
 Burn reads pi's session logs from `~/.bb/pi-bridge-sessions` on each machine. bb's pi bridge can be pointed elsewhere with `BB_PI_BRIDGE_SESSION_DIR`, but Burn does not follow it.
 
+A log with more than 50,000 entries is read from its newest entries, as OpenCode's own reader does with its 20,000 messages, so a single extremely long session drops its oldest spend from the figures. Across all logs Burn keeps at most 200,000 entries in memory and reads an evicted log again from the beginning when something asks for it. If the logs that are being polled at once hold more than that, the cost is repeated reads rather than growing memory. A line with no newline larger than 4 MB is dropped rather than held.
+
+A new thread's pi session id can reach bb after Burn's first lookup. Burn treats that lookup as provisional and looks again after five seconds, so a thread shows its figures within seconds even though the host watch could not match its log at first.
+
 After a machine's bb daemon restarts, live updates for its threads resume within a minute.
+
+Burn mints a token for each thread and gives it to that thread's pi session, so one thread's pi cannot report another thread's figures. A pi session that was already running when you updated Burn has no token and stops reporting its budget, context and stop marker until it restarts; its cost still shows from the session log. If Burn cannot read or write its token secret when it loads, it mints a per-load secret, which locks out every running session the same way until it restarts; check the plugin log for the storage error. Two plugin loads that overlap can also mint different secrets, with the same restart-only recovery.
 
 Burn waits at most a second for a machine to answer. When one takes longer, Burn shows the figures it last read there and updates them as soon as the machine answers.
 
@@ -32,7 +38,7 @@ Dollar figures are list prices unless you set a **Discount (%)** in Burn's setti
 
 The pi extension does not use Burn's discounts, so pi's pill and `/burn` show list price. With the pi extension installed and **Stop a thread at its budget** on, the extension stops a run when its list-price cost reaches the budget. With a discount set, that is earlier than the chip shows.
 
-Router aliases such as `shopify/auto-best` have no known price, so their threads show tokens. A cost in a currency other than US dollars is not converted, so that thread shows tokens too.
+Router aliases such as `shopify/auto-best` have no known price, so their threads show tokens unless you add their rates under **Price overrides** in Burn's settings. An override replaces that model's whole built-in rate row, including any long-context price tier, so give the rates you actually pay. Overrides price Claude Code and Codex threads, whose tokens Burn prices itself; pi and OpenCode threads keep the cost their harness recorded. A cost in a currency other than US dollars is not converted, so that thread shows tokens too. Estimates also skip a price tier when a Codex usage event covers more than one call, because the event has no single call's token count.
 
 ### Harnesses other than pi
 

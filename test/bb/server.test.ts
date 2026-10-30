@@ -4,6 +4,7 @@ import type { BurnAlert } from "../../extensions/bb/alerts.js";
 import type { EventRow } from "../../extensions/bb/ledger.js";
 import { SETTINGS_COPY_KEY } from "../../extensions/bb/keys.js";
 import plugin, { SETTINGS, settingsToRestore } from "../../extensions/bb/server.js";
+import { usageToken } from "../../extensions/bb/usage-auth.js";
 import * as spendServer from "../../extensions/bb/spend/server.js";
 import type { EntryLike, UsageReport } from "../../src/report.js";
 import { buildReport, dayKey } from "../../src/report.js";
@@ -35,6 +36,8 @@ type Options = {
   events?: EventRow[];
   /** Burn's own copy of its settings in its storage, as removing the plugin leaves it: the copy kept, bb's store empty. */
   settingsCopy?: Record<string, unknown>;
+  /** Stored pi reports, as a previous plugin load left them. */
+  reports?: Record<string, unknown>;
 };
 
 const LOG_MTIME = 1_700_000_000_000;
@@ -116,14 +119,19 @@ async function setup(opts: Options = {}) {
   });
   // Seeded before the plugin loads, so it reads them the way a fresh install after a removal does.
   if (opts.settingsCopy !== undefined) await bb.storage.kv.set(SETTINGS_COPY_KEY, opts.settingsCopy);
+  for (const [threadId, stored] of Object.entries(opts.reports ?? {})) await bb.storage.kv.set(`report:${threadId}`, stored);
   await plugin(bb);
   disposers.push(() => harness.lifecycle.dispose());
-  const post = (body: unknown) =>
-    harness.behavior.fetchHttp("POST", "/usage", {
+  const post = async (body: unknown) => {
+    const threadId = (body as { threadId?: string } | null)?.threadId ?? THREAD;
+    const secret = await bb.storage.kv.get<unknown>("usage-secret");
+    const token = typeof secret === "string" ? usageToken(secret, threadId) : "";
+    return harness.behavior.fetchHttp("POST", "/usage", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", "x-burn-token": token },
       body: typeof body === "string" ? body : JSON.stringify(body),
     });
+  };
   const rpc = <T,>(method: string, input: unknown) => harness.behavior.callRpc(method, input) as Promise<T>;
   const usage = (threadId = THREAD) => rpc<Record<string, any>>("usage", { threadId });
   const signals = () => harness.inspection.realtimeSignals.filter((s) => s.channel === "usage");
@@ -171,6 +179,7 @@ describe("settings", () => {
       "stopAtBudget",
       "flagOverBudget",
       "notifyExpensiveTurn",
+      "priceOverrides",
       "discount",
       "inputDiscount",
       "outputDiscount",
@@ -266,6 +275,24 @@ describe("POST /usage", () => {
     expect(s.signals()).toEqual([{ channel: "usage", payload: { threadId: THREAD } }]);
   });
 
+  it("rejects a report without the token minted for its own thread", async () => {
+    const s = await setup();
+    const send = (token?: string) =>
+      s.harness.behavior.fetchHttp("POST", "/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(token === undefined ? {} : { "x-burn-token": token }) },
+        body: JSON.stringify(envelope(1)),
+      });
+    expect((await send()).status).toBe(401);
+    expect((await send("a".repeat(64))).status).toBe(401);
+    const secret = await s.bb.storage.kv.get<unknown>("usage-secret");
+    expect(typeof secret).toBe("string");
+    expect((await send(usageToken(secret as string, CHILD))).status).toBe(401);
+    // Nothing reached the store from the rejected calls.
+    expect(await s.bb.storage.kv.get(`report:${THREAD}`)).toBeUndefined();
+    expect((await send(usageToken(secret as string, THREAD))).status).toBe(200);
+  });
+
   it("hands pi bb's budget: the thread's own, else the setting, and the stop setting as set", async () => {
     const s = await setup({ settings: { threadBudget: 10, stopAtBudget: true } });
     expect(await (await s.post(envelope(1))).json()).toEqual({ ok: true, policy: { budget: 10, stopAtBudget: true, notifyExpensiveTurn: false } });
@@ -319,7 +346,12 @@ describe("POST /usage", () => {
   it("gives pi the report address", async () => {
     const s = await setup();
     const entries = await s.harness.behavior.resolveProviderEnv("pi", { threadId: THREAD, projectId: "proj_1", hostId: "host_1" });
-    expect(entries.map((e) => [e.name, e.value])).toEqual([["BURN_BB_URL", { serverPath: "/api/v1/plugins/burn/http/usage" }]]);
+    expect(entries).toHaveLength(2);
+    expect(entries[0]).toMatchObject({ name: "BURN_BB_URL", value: { serverPath: "/api/v1/plugins/burn/http/usage" } });
+    expect(entries[1]).toMatchObject({ name: "BURN_BB_TOKEN" });
+    expect((entries[1]?.value as string)).toMatch(/^[0-9a-f]{64}$/);
+    const other = await s.harness.behavior.resolveProviderEnv("pi", { threadId: CHILD, projectId: "proj_1", hostId: "host_1" });
+    expect(other[1]?.value).not.toBe(entries[1]?.value);
   });
 
   it("forgets a deleted thread's report, budget, log copy and stop", async () => {
@@ -766,6 +798,13 @@ describe("stop at budget, for threads without the pi extension", () => {
     expect(s.stops()).toEqual([]);
   });
 
+  it("stops a thread whose stored pi report is stale, since no extension is reporting now", async () => {
+    const stale = { report: sampleReport(costOf(9)), sentAt: 1, at: Date.now() - 10 * 60_000 };
+    const s = await setup({ settings: ON, statuses: { [THREAD]: "active" }, logs: logs(), reports: { [THREAD]: stale } });
+    await run(s, 2);
+    await vi.waitFor(() => expect(s.stops()).toHaveLength(1));
+  });
+
   it("stops a Codex thread once when a response crosses its budget, even its first one", async () => {
     const s = await setup({ settings: { threadBudget: 0.05, stopAtBudget: true }, providers: { [THREAD]: "codex" }, statuses: { [THREAD]: "active" } });
     await s.record(THREAD, requestEvent(THREAD, "go", "gpt-5.5"), usageEvent(THREAD, CODEX_1));
@@ -944,13 +983,13 @@ describe("discounts", () => {
 
 it('sends one family native aggregate while retaining per-thread rows', async () => {
  const s = await setup({descendants:{[THREAD]:[CHILD]}});
- const agents = {coverage:'available' as const, rows:Array.from({length:120}, (_,i) => ({id:`native-${i}`,calls:1,cost:{input:1,output:0,cacheRead:0,cacheWrite:0,total:1},estimated:false}))};
+ const agents = {coverage:'available' as const, rows:Array.from({length:40}, (_,i) => ({id:`native-${i}`,calls:1,cost:{input:1,output:0,cacheRead:0,cacheWrite:0,total:1},estimated:false}))};
  await s.post(envelope(1, {...costOf(120),agents}));
  await s.post(envelope(1, {...costOf(120),agents},CHILD));
  const got = await s.usage();
- expect(got.family.agents?.count).toBe(240);
+ expect(got.family.agents?.count).toBe(80);
  expect(got.family.agents?.rows).toHaveLength(1);
- expect(got.family.agents?.rows[0]).toMatchObject({id:'family-total',calls:240,cost:{total:240}});
- expect(got.report?.agents?.rows).toHaveLength(120);
- expect(got.family.children[0]?.agents?.rows).toHaveLength(120);
+ expect(got.family.agents?.rows[0]).toMatchObject({id:'family-total',calls:80,cost:{total:80}});
+ expect(got.report?.agents?.rows).toHaveLength(40);
+ expect(got.family.children[0]?.agents?.rows).toHaveLength(40);
 });

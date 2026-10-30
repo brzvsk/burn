@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { usageEnvelopeSchema, usageReportSchema } from "../../extensions/bb/schema.js";
 import {
+  AGENTS_MAX,
   buildReport,
   CALL_COSTS_MAX,
   CALL_TIME_BUCKETS,
@@ -8,6 +9,7 @@ import {
   DAYS_MAX,
   HOURS_MAX,
   MODELS_MAX,
+  OTHER_KEY,
   PROMPT_MAX,
   SERIES_MAX,
   TURN_MODELS_MAX,
@@ -31,6 +33,19 @@ describe("usageReportSchema", () => {
     expect(usageReportSchema.safeParse({ ...base, series }).success).toBe(false);
     const byModel = Array.from({ length: 9 }, (_, i) => ({ key: `k${i}`, cost: 1, tokens: 1, calls: 1 }));
     expect(usageReportSchema.safeParse({ ...base, byModel }).success).toBe(false);
+  });
+
+  it("folds an older extension's oversized agent rows instead of rejecting them", () => {
+    const base = sampleReport();
+    const rows = Array.from({ length: AGENTS_MAX + 5 }, (_, i) => ({
+      id: `agent-${i}`,
+      calls: 1,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.1 },
+      estimated: false,
+    }));
+    const parsed = usageReportSchema.parse({ ...base, agents: { coverage: "partial", rows } });
+    expect(parsed.agents?.rows).toHaveLength(AGENTS_MAX);
+    expect(parsed.agents?.rows.at(-1)?.id).toBe(OTHER_KEY);
   });
 
   it("upgrades a version 1 report from an older extension", () => {

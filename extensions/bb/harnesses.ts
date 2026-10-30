@@ -1,4 +1,4 @@
-import { ANTHROPIC_PRICES, OPENAI_CODEX_PRICES, type PriceTable } from "../../src/prices.js";
+import { ANTHROPIC_PRICES, OPENAI_CODEX_PRICES, type PriceOverrides, type PriceTable, withPrices } from "../../src/prices.js";
 
 /** How Burn reads one bb provider's threads. */
 export interface Harness {
@@ -29,3 +29,9 @@ const NAMES: Readonly<Record<string, string>> = { pi: "pi", "acp-opencode": "Ope
 export const harnessName = (providerId: string): string => (Object.hasOwn(NAMES, providerId) ? (NAMES[providerId] as string) : providerId);
 
 export const harnessOf = (providerId: string): Harness => (Object.hasOwn(HARNESSES, providerId) ? (HARNESSES[providerId] as Harness) : OTHER);
+
+/** The harness with the settings' price overrides laid over its list prices. */
+export function harnessWithPrices(providerId: string, overrides: PriceOverrides = {}): Harness {
+  const harness = harnessOf(providerId);
+  return harness.prices === null ? harness : { ...harness, prices: withPrices(harness.prices, overrides) };
+}

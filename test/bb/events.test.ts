@@ -1,7 +1,8 @@
 import { createFakePluginHost, makeThreadResponse } from "@get-bb/plugin-sdk/testing";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createEventReader } from "../../extensions/bb/events.js";
 import { type EventRow, USAGE_EVENTS } from "../../extensions/bb/ledger.js";
+import type { PriceOverrides } from "../../src/prices.js";
 import { CODEX_1, CODEX_1_2, CODEX_2, event, listEvents, requestEvent, usageEvent } from "./fixtures.js";
 
 const T = "thr_aaaaaaaa";
@@ -11,9 +12,10 @@ afterEach(async () => {
   for (const dispose of disposers.splice(0)) await dispose();
 });
 
-function setup() {
+function setup(overrides?: () => PriceOverrides) {
   const rows: EventRow[] = [];
   let failing = false;
+  let gate: Promise<void> | null = null;
   let now = 1_000_000;
   const { bb, harness } = createFakePluginHost({
     pluginId: "burn",
@@ -22,6 +24,7 @@ function setup() {
         events: {
           list: async (args: Parameters<ReturnType<typeof listEvents>>[0]) => {
             if (failing) throw new Error("bb is restarting");
+            if (gate) await gate;
             return listEvents(() => rows)(args);
           },
         },
@@ -30,7 +33,7 @@ function setup() {
   });
   disposers.push(() => harness.lifecycle.dispose());
   const changed: string[][] = [];
-  const reader = () => createEventReader(bb, { onChange: (ids) => void changed.push(ids), now: () => now });
+  const reader = () => createEventReader(bb, { onChange: (ids) => void changed.push(ids), now: () => now, ...(overrides ? { overrides } : {}) });
   const lists = () => harness.inspection.sdk.callsTo("threads.events.list").map(([args]) => args as Record<string, unknown>);
   const notice = (threadId: string, providerId: string) =>
     harness.behavior.emitThreadEvent("experimental_thread.events", { thread: makeThreadResponse({ id: threadId, providerId }), sequence: rows.length });
@@ -38,7 +41,17 @@ function setup() {
   const fail = (on: boolean) => {
     failing = on;
   };
-  return { bb, rows, reader, changed, lists, notice, warnings, fail, tick: (ms: number) => (now += ms) };
+  const hold = (): (() => void) => {
+    let release = (): void => undefined;
+    gate = new Promise((resolve) => {
+      release = () => {
+        gate = null;
+        resolve();
+      };
+    });
+    return release;
+  };
+  return { bb, rows, reader, changed, lists, notice, warnings, fail, hold, tick: (ms: number) => (now += ms) };
 }
 
 describe("createEventReader", () => {
@@ -61,6 +74,28 @@ describe("createEventReader", () => {
     await reader.reportOf(T, "codex");
     expect(s.lists()).toHaveLength(3);
     expect(s.lists()[2]).toMatchObject({ afterSeq: String(s.rows[2]?.seq) });
+  });
+
+  it("reads again after invalidateAll overtook a read in flight", async () => {
+    const s = setup();
+    s.rows.push(requestEvent(T, "go", "gpt-5.5"), usageEvent(T, CODEX_1));
+    const reader = s.reader();
+    const release = s.hold();
+    const run = reader.reportOf(T, "codex");
+    await vi.waitFor(() => expect(s.lists()).toHaveLength(1));
+    reader.invalidateAll();
+    release();
+    await run;
+    await reader.reportOf(T, "codex");
+    expect(s.lists()).toHaveLength(2);
+  });
+
+  it("prices tokens with the settings' price overrides", async () => {
+    const s = setup(() => ({ "gpt-5.5": { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } }));
+    s.rows.push(requestEvent(T, "go", "gpt-5.5"), usageEvent(T, CODEX_1));
+    const got = await s.reader().reportOf(T, "codex");
+    // CODEX_1 is 4,000 input, 6,000 cache reads and 1,000 output at $1 per million each.
+    expect(got?.report.cost.total).toBeCloseTo(0.011, 9);
   });
 
   it("pages through more than a hundred events", async () => {

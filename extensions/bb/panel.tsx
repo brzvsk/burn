@@ -330,7 +330,7 @@ export function BurnPanel({ threadId, params }: PluginThreadPanelProps): ReactNo
           />
         </div>
       </section>
-      {report !== null && !isTokenOnly(report) ? <WhereItWent report={report} /> : null}
+      {report !== null && !isTokenOnly(report) && report.cost.total > 0 ? <WhereItWent report={report} /> : null}
       {report !== null ? <Models report={report} /> : null}
       {report !== null ? (
         <div>

@@ -1,6 +1,6 @@
 {
   "name": "burn",
-  "version": "0.8.3",
+  "version": "0.9.0",
   "description": "See what each thread has cost: a pill in pi's footer and in bb's prompt-box footer, per-prompt breakdowns, budgets, and spend across threads.",
   "type": "module",
   "keywords": [

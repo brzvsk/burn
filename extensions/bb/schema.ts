@@ -12,6 +12,7 @@ import {
   TURN_TOOLS_MAX,
   TURNS_MAX,
   type UsageReport,
+  foldAgentRows,
 } from "../../src/report.js";
 
 export const THREAD_ID = /^thr_[0-9a-z]{6,40}$/;
@@ -23,7 +24,8 @@ const cost = z.object({ input: amount, output: amount, cacheRead: amount, cacheW
 export const agentUsageSchema = z.object({
   count: count.optional(),
   coverage: z.enum(["available", "partial"]),
-  rows: z.array(z.object({id: key, calls: count, cost, estimated: z.boolean()})),
+  // An older extension can send every agent row; fold rather than reject, so its figures still land inside bb's KV cap.
+  rows: z.array(z.object({ id: key, calls: count, cost, estimated: z.boolean() })).transform(foldAgentRows),
 });
 const tokenParts = z.object({ input: amount, output: amount, cacheRead: amount, cacheWrite: amount });
 const tokenCounts = tokenParts.extend({ reasoning: amount });

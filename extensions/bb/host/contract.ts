@@ -19,6 +19,13 @@ export const hostContract = defineRpcContract({
       harness: z.enum(["pi", "opencode", "claude"]),
       /** The bb server's IANA zone, so `days` are its local days whatever the host's zone. */
       timeZone: z.string().max(100),
+      /** Burn's price overrides from settings, for the Claude reader, which prices tokens itself. */
+      prices: z
+        .record(
+          z.string().max(200),
+          z.object({ input: z.number().finite().nonnegative(), output: z.number().finite().nonnegative(), cacheRead: z.number().finite().nonnegative(), cacheWrite: z.number().finite().nonnegative() }),
+        )
+        .optional(),
       threads: z
         .array(
           z.object({

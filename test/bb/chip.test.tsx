@@ -341,6 +341,30 @@ describe("the chip's popover", () => {
     await vi.waitFor(() => expect(slot.queryByRole("dialog")).toBeNull());
   });
 
+  it("shows a cost reported as one total as an Unsplit slice, not an empty grey bar", async () => {
+    const report = sampleReport({ cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 1.5 } });
+    const card = await openCard(await renderChip(backend(() => answer({ report }))));
+    const where = card.getByTestId("where-it-went");
+    expect(where.textContent).toContain("Unsplit$1.50");
+    expect(where.textContent).toContain("Part of this cost was reported as one total");
+    expect(where.querySelector('[data-part="unsplit"]')).not.toBeNull();
+  });
+
+  it("hides Where it went until there is a priced call", async () => {
+    const report = sampleReport({
+      calls: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 },
+      lastTurnCost: 0,
+      byModel: [],
+      series: [],
+      turns: [],
+      turnCount: 0,
+    });
+    const card = await openCard(await renderChip(backend(() => answer({ report }))));
+    expect(card.queryByTestId("where-it-went")).toBeNull();
+  });
+
   it("shows each model's output speed over its timed calls", async () => {
     const report = sampleReport({ byModel: [modelRow("p/claude-opus", 4.31, 1_500_000, 18, { timed: 18, ms: 36_000, timedOutput: 2232 }), modelRow("p/claude-haiku", 0.51, 236_000, 5)] });
     const card = await openCard(await renderChip(backend(() => answer({ report }))));

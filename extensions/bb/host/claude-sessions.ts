@@ -1,7 +1,7 @@
 import { open, readdir, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { ANTHROPIC_PRICES, listCost, priceOf } from "../../../src/prices.js";
+import { ANTHROPIC_PRICES, listCost, type PriceOverrides, priceOf, type PriceTable, withPrices } from "../../../src/prices.js";
 import { buildReport, type EntryLike, type UsageReport, promptExcerpt } from "../../../src/report.js";
 
 export const claudeProjectsDir = (env = process.env): string => join(env.CLAUDE_CONFIG_DIR || join(homedir(), ".claude"), "projects");
@@ -25,11 +25,15 @@ interface FileState {
 interface OwnHistory {
   since?: number;
   parentSessionIds?: readonly string[];
+  /** Burn's price overrides; the Claude reader prices tokens itself because the transcripts record no cost. */
+  prices?: PriceOverrides;
 }
 
 export function createClaudeSessions(opts: { dir: string }) {
   const files = new Map<string, FileState>();
   let gate: Promise<unknown> = Promise.resolve();
+  let priceTable: PriceTable = ANTHROPIC_PRICES;
+  let priceSig = "";
   async function directories(dir: string): Promise<string[]> {
     try {
       return (await readdir(dir, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => join(dir, e.name));
@@ -88,7 +92,7 @@ export function createClaudeSessions(opts: { dir: string }) {
       cacheRead: number(u.cache_read_input_tokens),
       cacheWrite: number(u.cache_creation_input_tokens),
     };
-    const price = priceOf(ANTHROPIC_PRICES, model);
+    const price = priceOf(priceTable, model);
     const cost = price ? listCost(price, tokens, { tiers: true }) : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
     // Anthropic's one-hour write is 2x input versus the five-minute 1.25x input.
     const hour = number(object(u.cache_creation)?.ephemeral_1h_input_tokens);
@@ -152,6 +156,13 @@ export function createClaudeSessions(opts: { dir: string }) {
     return state;
   }
   async function report(sessionIds: readonly string[], timeZone: string, own: OwnHistory): Promise<{ report: UsageReport; at: number } | null> {
+    // The cached entries carry the cost they were read with, so a price change rereads the transcripts.
+    const sig = JSON.stringify(own.prices ?? {});
+    if (sig !== priceSig) {
+      priceSig = sig;
+      priceTable = withPrices(ANTHROPIC_PRICES, own.prices ?? {});
+      files.clear();
+    }
     const roots = await directories(opts.dir);
     const entries = new Map<string, EntryLike>();
     const inherited = new Set<string>();

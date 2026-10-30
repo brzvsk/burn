@@ -114,11 +114,20 @@ const KINDS = [
 /** "Where it went": cost by token kind as one bar and a two-column legend. */
 export function WhereItWent({ report }: { report: UsageReport }): ReactNode {
   const { cost } = report;
+  // A harness can report one total with no split (an unsupported price, or a cost event before its tokens), which else leaves the bar grey.
+  const split = cost.input + cost.cacheRead + cost.cacheWrite + cost.output;
+  const unsplit = cost.total - split;
+  const hasUnsplit = unsplit > 1e-9;
   const pct = (n: number): string => (cost.total > 0 ? `${Math.round((n / cost.total) * 100)}%` : "–");
   return (
     <div data-testid="where-it-went">
       <Label aside={report.cacheHitPct !== null ? `cache hit ${report.cacheHitPct.toFixed(0)}%` : undefined}>Where it went</Label>
-      <StackedBar parts={(["input", "cacheRead", "cacheWrite", "output"] as const).map((k) => ({ key: k, value: cost[k], className: KIND_COLOURS[k] }))} />
+      <StackedBar
+        parts={[
+          ...(["input", "cacheRead", "cacheWrite", "output"] as const).map((k) => ({ key: k, value: cost[k], className: KIND_COLOURS[k] })),
+          ...(hasUnsplit ? [{ key: "unsplit", value: unsplit, className: "bg-muted-foreground" }] : []),
+        ]}
+      />
       <div className="mt-2 grid grid-cols-2 gap-x-3.5 gap-y-1 text-xs">
         {KINDS.map(([key, label]) => (
           // The label gives way before the figures do: a wider UI font (a monospace theme, say) must not push the row past the card.
@@ -131,7 +140,20 @@ export function WhereItWent({ report }: { report: UsageReport }): ReactNode {
             <span className="w-7 shrink-0 text-right text-muted-foreground tabular-nums">{pct(cost[key])}</span>
           </div>
         ))}
+        {hasUnsplit ? (
+          <div className="flex min-w-0 items-center gap-1.5" data-kind="unsplit">
+            <i className="size-2 shrink-0 rounded-[2px] bg-muted-foreground" />
+            <span className="truncate" title="Reported as one total, without a split by token kind">
+              Unsplit
+            </span>
+            <span className="ml-auto shrink-0 tabular-nums">{formatUsd(unsplit)}</span>
+            <span className="w-7 shrink-0 text-right text-muted-foreground tabular-nums">{pct(unsplit)}</span>
+          </div>
+        ) : null}
       </div>
+      {hasUnsplit ? (
+        <p className="mt-1.5 text-[11px] text-muted-foreground">Part of this cost was reported as one total, without a split by token kind.</p>
+      ) : null}
     </div>
   );
 }
@@ -294,7 +316,7 @@ export function BurnCard({ answer, threadId, defaultBudget, discounted, now, onO
             ) : null}
           </div>
           {editor}
-          {isTokenOnly(report) ? null : (
+          {isTokenOnly(report) || report.cost.total <= 0 ? null : (
             <div className="border-t border-border px-3 py-2.5">
               <WhereItWent report={report} />
             </div>
