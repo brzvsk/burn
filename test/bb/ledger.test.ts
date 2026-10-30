@@ -22,8 +22,8 @@ function reportOf(providerId: string, ...batches: EventRow[][]) {
 describe("harnessOf", () => {
   it("reads pi from its logs and every other harness from bb's events, with its prices and conventions", () => {
     expect(harnessOf("pi")).toEqual({ reader: "pi-log", prices: null, cacheInInput: false, perCall: true });
-    expect(harnessOf("codex")).toEqual({ reader: "events", prices: OPENAI_CODEX_PRICES, cacheInInput: true, perCall: true });
-    expect(harnessOf("claude-code")).toEqual({ reader: "events", prices: ANTHROPIC_PRICES, cacheInInput: false, perCall: false });
+    expect(harnessOf("codex")).toEqual({ reader: "events", prices: OPENAI_CODEX_PRICES, cacheInInput: true, perCall: true, separateChildCounters: true });
+    expect(harnessOf("claude-code")).toEqual({ reader: "claude-log", prices: ANTHROPIC_PRICES, cacheInInput: false, perCall: false });
     expect(harnessOf("acp-cursor")).toEqual({ reader: "events", prices: null, cacheInInput: null, perCall: false });
     expect(harnessOf("constructor")).toEqual(harnessOf("acp-cursor"));
   });
@@ -191,4 +191,21 @@ describe("prompts and models", () => {
     expect(ledger.state.model).toBe("gpt-5.5");
     expect(ledger.state.afterSeq).toBe(notice.seq);
   });
+});
+
+
+it("keeps interleaved native child counters apart when BB reuses the parent provider id", () => {
+  const scoped = (row: EventRow, turnId: string): EventRow => ({ ...row, scope: { kind: "turn", turnId } });
+  const first = totals({ totalTokens: 100, inputTokens: 90, outputTokens: 10 });
+  const child = totals({ totalTokens: 80, inputTokens: 75, outputTokens: 5 });
+  const next = totals({ totalTokens: 220, inputTokens: 200, outputTokens: 20 });
+  const last = totals({ totalTokens: 120, inputTokens: 110, outputTokens: 10 });
+  const ledger = newLedger(); const harness = harnessOf("codex");
+  addRows(ledger, [request("go", "gpt-5.5"), scoped(usage(first), "main"),
+    scoped(event(T, "turn/started", { providerThreadId: "s1", parentToolCallId: "delegate" }), "child"), scoped(usage(child), "child")], harness);
+  // A reload must retain the child-to-counter mapping.
+  const restored = JSON.parse(JSON.stringify(ledger));
+  addRows(restored, [scoped(usage(next, last), "main")], harness);
+  const report = buildReport(ledgerEntries(restored, "codex", harness), null);
+  expect(report.tokens.input).toBe(275); expect(report.tokens.output).toBe(25); expect(report.calls).toBe(3);
 });

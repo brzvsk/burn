@@ -288,6 +288,7 @@ export function createOpencodeDb(opts: { path: string; modelsPath?: string }): O
             const entry = {
               type: "message",
               timestamp,
+              ...(child ? {agentId: sessionId} : {}),
               message: {
                 role: "assistant",
                 provider,
@@ -302,7 +303,9 @@ export function createOpencodeDb(opts: { path: string; modelsPath?: string }): O
         }
         if (entries.length === 0) return null;
         entries.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp));
-        return { report: buildReport(entries, null, { timeZone }), at: at || Date.now() };
+        const report = buildReport(entries, null, { timeZone });
+        report.agents = {coverage: "partial", rows: report.agents?.rows ?? []};
+        return { report, at: at || Date.now() };
       } catch {
         return null;
       } finally {

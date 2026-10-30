@@ -18,6 +18,10 @@ export interface ThreadRow {
   status: string;
   updatedAt: number;
   archivedAt: number | null;
+  parentThreadId?: string | null;
+  sourceThreadId?: string | null;
+  createdAt?: number;
+  lifecycleOwnerThreadId?: string | null;
 }
 
 export interface ThreadDirectory {
@@ -40,6 +44,10 @@ type ListedRow = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["list"]>>[numb
 
 const toRow = (t: ListedRow): ThreadRow => ({
   id: t.id,
+  parentThreadId: t.parentThreadId,
+  sourceThreadId: t.sourceThreadId,
+  createdAt: t.createdAt,
+  lifecycleOwnerThreadId: t.lifecycleOwnerThreadId,
   title: t.title,
   titleFallback: t.titleFallback,
   projectId: t.projectId,
@@ -108,6 +116,10 @@ export function createThreadDirectory(bb: BbPluginApi, opts: { now?: () => numbe
         if (t.environmentId !== null) hostId = (await bb.sdk.environments.get({ environmentId: t.environmentId })).hostId;
         return {
           id: t.id,
+          parentThreadId: t.parentThreadId,
+          sourceThreadId: t.sourceThreadId,
+          createdAt: t.createdAt,
+          lifecycleOwnerThreadId: t.lifecycleOwnerThreadId,
           title: t.title,
           titleFallback: t.titleFallback,
           projectId: t.projectId,

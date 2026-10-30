@@ -14,6 +14,7 @@ import { alertEvents, alertFor } from "./notify.js";
 import { discountsOf } from "./prefs.js";
 import { type Stored, storedSchema, usageEnvelopeSchema } from "./schema.js";
 import { createReportSource } from "./sources.js";
+import { withOwnedThreads, spawnedTurnCost } from "./family.js";
 import { checkDailyBudget, createSpendHandlers, type SpendDeps } from "./spend/server.js";
 
 export { rpcContract } from "./contract.js";
@@ -375,13 +376,15 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     return title;
   }
 
-  async function descendantsOf(threadIds: readonly string[]): Promise<Map<string, string[]>> {
+  async function descendantsOf(threadIds: readonly string[], strict = false): Promise<Map<string, string[]>> {
     try {
       // Archived and hidden children still cost money, and thread-spend counts them too.
       const { threads } = await bb.sdk.threads.experimental_listDescendants({ threadIds, includeArchived: true, includeHidden: true });
-      return new Map(threads.map((t) => [t.threadId, t.descendantIds]));
+      const rows = await directory.all();
+      return new Map(threads.map((t) => [t.threadId, withOwnedThreads(t.threadId, t.descendantIds, rows)]));
     } catch (err) {
       bb.log.warn(`listing the child threads of ${threadIds.length} thread(s) failed: ${message(err)}`);
+      if (strict) throw err;
       return new Map();
     }
   }
@@ -396,13 +399,21 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
         threadId: id,
         title: (await titleOf(id)) ?? UNTITLED,
         cost: r.cost.total,
+        ...(r.agents ? {agents: r.agents} : {}),
         calls: r.calls,
         running: r.running,
         model: topModel(r),
         estimated: r.estimated,
       })),
     );
-    return { total, calls, estimated, children };
+    const all = [report, ...reported.map(r => r.report)];
+    const rows = all.flatMap(r => r?.agents?.rows ?? []);
+    const cost = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+    for (const row of rows) for (const key of Object.keys(cost) as (keyof typeof cost)[]) cost[key] += row.cost[key];
+    // Family consumers need only a total; individual rows stay with each displayed thread.
+    const agentRows = rows.length ? [{ id: "family-total", calls: rows.reduce((n, r) => n + r.calls, 0), cost, estimated: rows.some(r => r.estimated) }] : [];
+    const agents = { coverage: all.every(r => r?.agents?.coverage === "available") ? "available" as const : "partial" as const, rows: agentRows, count: rows.length };
+    return { total, calls, estimated, children, agents };
   }
 
   async function costRow(threadId: string, report: UsageReport | null, children: { id: string; report: UsageReport }[], values: Values): Promise<CostRow> {
@@ -424,6 +435,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     budgetOf: async (threadId, report) => (await budgetOf(threadId, report))?.amount ?? null,
     dailyBudget: async () => positiveOrNull((await settings.get()).dailyBudget),
     reports: threadReports,
+    descendantsOf: ids => descendantsOf(ids, true),
     rowsOf: async (ids) => {
       const out = new Map<string, { title: string; projectId: string; providerId: string }>();
       await Promise.all(
@@ -544,8 +556,22 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       .catch((err: unknown) => {
         if (!disposed) bb.log.warn(`looking at the new figures of ${threadIds.length} thread(s) failed: ${message(err)}`);
       })
-      .finally(() => {
-        if (!disposed) for (const threadId of threadIds) bb.realtime.publish("usage", { threadId });
+      .finally(async () => {
+        if (disposed) return;
+        const about = new Set(threadIds);
+        try {
+          const rows = await directory.all();
+          let grew = true;
+          while (grew) {
+            grew = false;
+            for (const row of rows) if (about.has(row.id)) {
+              for (const parent of [row.parentThreadId, row.lifecycleOwnerThreadId]) if (parent && !about.has(parent)) {
+                about.add(parent); grew = true;
+              }
+            }
+          }
+        } catch { bb.realtime.publish("usage", {}); }
+        if (!disposed) for (const threadId of about) bb.realtime.publish("usage", { threadId });
       });
   }
 
@@ -561,6 +587,10 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
         titleOf(threadId),
         familyOf(report, reportsIn(resolved, descendants)),
       ]);
+      if (report) {
+        family.lastTurnCost = spawnedTurnCost(threadId, report.turns.at(-1)?.at, report.lastTurnCost,
+          reportsIn(resolved, descendants), await directory.all().catch(() => []));
+      }
       return { report, source: own?.source ?? null, reportedAt: own?.at ?? null, title, budget, policy, family };
     },
     setBudget: async ({ threadId, budget }) => {

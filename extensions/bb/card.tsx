@@ -14,6 +14,7 @@ import {
   usageLabel,
 } from "../../src/format.js";
 import { outputPerSec, type UsageReport } from "../../src/report.js";
+import { agentLabel, CostBreakdown } from "./agents.js";
 import { BudgetEditor } from "./budget-editor.js";
 import { budgetWords, type EffectiveBudget } from "./budgets.js";
 import { CallChart, callPoints, Meter, StackedBar } from "./charts.js";
@@ -267,10 +268,10 @@ export function BurnCard({ answer, threadId, defaultBudget, discounted, now, onO
         <>
           <div className="px-3 py-2.5">
             <div className="flex items-baseline gap-2.5">
-              <span className="text-[26px] leading-tight font-semibold tracking-tight tabular-nums">{usageLabel(report)}</span>
+              <CostBreakdown answer={answer!}><span className="text-[26px] leading-tight font-semibold tracking-tight tabular-nums">{usageLabel(report)}</span></CostBreakdown>
               {!isTokenOnly(report) && report.lastTurnCost > 0 ? (
                 <span className="rounded-full bg-success/15 px-1.5 py-px text-[11.5px] font-semibold text-success tabular-nums">
-                  {formatDelta(report.lastTurnCost)} last turn
+                  {formatDelta(answer?.family.lastTurnCost ?? report.lastTurnCost)} last turn
                 </span>
               ) : null}
             </div>
@@ -282,6 +283,9 @@ export function BurnCard({ answer, threadId, defaultBudget, discounted, now, onO
                 {withChildren}
               </div>
             ) : null}
+            <div className="mt-1 text-[11px] text-muted-foreground tabular-nums" data-testid="agents-line">
+              Subagents · {agentLabel(report.agents)}
+            </div>
             {isTokenOnly(report) ? null : <BudgetStatus cost={report.cost.total} budget={budget} onSet={() => setEditing(true)} />}
             {report.stoppedAt !== null ? (
               <div className="mt-2">

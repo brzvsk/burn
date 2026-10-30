@@ -25,6 +25,7 @@ export interface SpendDeps {
   reports?(since: number, prices?: "settings" | "list"): Promise<{ entries: Entry[]; reading: number }>;
   /** Title, project and provider of these threads, from one shared listing rather than a call per thread. */
   rowsOf?(ids: readonly string[]): Promise<Map<string, { title: string; projectId: string; providerId: string }>>;
+  descendantsOf?(ids: readonly string[]): Promise<Map<string, string[]>>;
   now?: () => number;
 }
 
@@ -313,6 +314,10 @@ export function createSpendHandlers(deps: SpendDeps): {
     });
     const children = new Map<string, number>();
     for (const batch of chunks(stale, SDK_BATCH)) {
+      if (deps.descendantsOf) {
+        for (const [id, ids] of await deps.descendantsOf(batch)) children.set(id, ids.length);
+        continue;
+      }
       const { threads: found } = await bb.sdk.threads.experimental_listDescendants({
         threadIds: batch,
         includeArchived: true,

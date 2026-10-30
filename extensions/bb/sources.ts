@@ -52,6 +52,8 @@ export interface ReportSource {
 
 /** What bb says about a thread: its provider, the machine that keeps its pi logs (null for none, or not pi) and its pi sessions. */
 interface Facts {
+  since?: number;
+  parentSessionIds?: string[];
   at: number;
   hostId: string | null;
   /** null when the lookup failed. */
@@ -125,6 +127,8 @@ export function createReportSource(
 
   /** What the thread row says, however Burn got it: one shared listing, or a call of its own. */
   interface Looked {
+    since?: number;
+    sourceThreadId?: string | null;
     status: string;
     providerId: string;
     environmentId: string | null;
@@ -138,10 +142,26 @@ export function createReportSource(
       const row = await opts.threads.one(threadId);
       return row === null
         ? null
-        : { status: row.status, providerId: row.providerId, environmentId: row.environmentId, hostId: row.hostId, hostKnown: true };
+        : {
+            status: row.status,
+            providerId: row.providerId,
+            environmentId: row.environmentId,
+            hostId: row.hostId,
+            hostKnown: true,
+            sourceThreadId: row.sourceThreadId,
+            since: row.sourceThreadId ? row.createdAt : undefined,
+          };
     }
     const thread = await bb.sdk.threads.get({ threadId });
-    return { status: thread.status, providerId: thread.providerId, environmentId: thread.environmentId, hostId: null, hostKnown: false };
+    return {
+      status: thread.status,
+      providerId: thread.providerId,
+      environmentId: thread.environmentId,
+      hostId: null,
+      hostKnown: false,
+      sourceThreadId: thread.sourceThreadId,
+      since: thread.sourceThreadId ? thread.createdAt : undefined,
+    };
   }
 
   async function lookUp(threadId: string): Promise<Facts> {
@@ -153,7 +173,7 @@ export function createReportSource(
     }
     if ((heard.get(threadId) ?? 0) === before) remember(statuses, threadId, row.status);
     const reader = harnessOf(row.providerId).reader;
-    if ((reader !== "pi-log" && reader !== "opencode-db") || row.environmentId === null) {
+    if ((reader !== "pi-log" && reader !== "opencode-db" && reader !== "claude-log") || row.environmentId === null) {
       return { at: now(), hostId: null, providerId: row.providerId, sessionIds: [], stems: new Set() };
     }
     const hostId = row.hostKnown ? row.hostId : (await bb.sdk.environments.get({ environmentId: row.environmentId })).hostId;
@@ -167,7 +187,19 @@ export function createReportSource(
     const sessionIds = [...new Set([...identities, threadId])].slice(-SESSIONS_MAX);
     // Only pi's bridge names its session files after these ids.
     const stems = reader === "pi-log" ? new Set(sessionIds.map(sessionStem)) : new Set<string>();
-    return { at: now(), hostId, providerId: row.providerId, sessionIds, stems };
+    let parentSessionIds: string[] | undefined;
+    if (reader === "claude-log" && row.sourceThreadId) {
+      const parentRows = await bb.sdk.threads.events.list({ threadId: row.sourceThreadId, types: ["thread/identity"] });
+      parentSessionIds = [
+        ...new Set(
+          parentRows.flatMap((r) => {
+            const id = (r.data as { providerThreadId?: unknown }).providerThreadId;
+            return typeof id === "string" ? [id] : [];
+          }),
+        ),
+      ].slice(-32);
+    }
+    return { at: now(), hostId, providerId: row.providerId, sessionIds, stems, since: row.since, parentSessionIds };
   }
 
   /** The lookup under way per thread, so a caller joins it instead of asking bb again. */
@@ -228,7 +260,12 @@ export function createReportSource(
     return null;
   }
 
-  async function ask(hostId: string, harness: "pi" | "opencode", threadIds: string[], answers: Map<string, LogReport | null>): Promise<void> {
+  async function ask(
+    hostId: string,
+    harness: "pi" | "opencode" | "claude",
+    threadIds: string[],
+    answers: Map<string, LogReport | null>,
+  ): Promise<void> {
     const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     for (let start = 0; start < threadIds.length; start += HOST_BATCH) {
       const batch = threadIds.slice(start, start + HOST_BATCH);
@@ -238,18 +275,40 @@ export function createReportSource(
       try {
         answer = await host.call(
           "reports",
-          { harness, timeZone, threads: batch.map((threadId) => ({ threadId, sessionIds: facts.get(threadId)?.sessionIds ?? [threadId] })) },
+          {
+            harness,
+            timeZone,
+            threads: batch.map((threadId) => ({
+              threadId,
+              sessionIds: facts.get(threadId)?.sessionIds ?? [threadId],
+              ...(harness === "claude" && facts.get(threadId)?.since !== undefined ? { since: facts.get(threadId)!.since! } : {}),
+              ...(harness === "claude" && facts.get(threadId)?.parentSessionIds !== undefined ? { parentSessionIds: facts.get(threadId)!.parentSessionIds! } : {}),
+            })),
+          },
           { hostId, timeoutMs: HOST_TIMEOUT_MS },
         );
       } catch (err) {
         failedAt.set(hostId, now());
-        const what = harness === "pi" ? "pi session logs" : "opencode's database";
+        const what = harness === "claude" ? "Claude transcripts" : harness === "pi" ? "pi session logs" : "opencode's database";
         bb.log.warn(`reading ${what} on ${hostId} failed, so Burn shows the last figures it read there: ${message(err)}`);
         return;
       }
       failedAt.delete(hostId);
       for (const { threadId, report, at } of answer.reports) {
-        const got: LogReport | null = report !== null && at !== null ? { report, at, source: "log" } : null;
+        let got: LogReport | null = report !== null && at !== null ? { report, at, source: "log" } : null;
+        if (harness === "claude" && got?.report.coverage === "partial") {
+          const kept = await lastKept(threadId);
+          if (kept && kept.report.coverage !== "partial") {
+            got = {
+              ...kept,
+              report: {
+                ...kept.report,
+                coverage: "partial",
+                coverageNote: "Partial latest Claude history: showing the last saved transcript report.",
+              },
+            };
+          }
+        }
         answers.set(threadId, got);
         if ((versions.get(threadId) ?? 0) === seen.get(threadId)) remember(reports, threadId, { got, checkedAt }, REPORTS_MAX);
         if (got) await save(threadId, got);
@@ -282,7 +341,10 @@ export function createReportSource(
     const reader = harnessOf(thread.providerId).reader;
     if (reader === "events") events.invalidate(thread.id);
     // opencode records a call when it finishes, and Burn has no watch on its database.
-    else if (reader === "opencode-db") invalidate(thread.id);
+    else if (reader === "opencode-db" || reader === "claude-log") {
+      invalidate(thread.id);
+      if (reader === "claude-log") events.invalidate(thread.id);
+    }
     opts.onChange([thread.id]);
   }
 
@@ -294,7 +356,7 @@ export function createReportSource(
   for (const name of ["thread.idle", "thread.failed"] as const) bb.events.on(name, ({ thread }) => heardStatus(thread));
   // Burn has no watch on opencode's database; bb records the thread's events, at most once a second, while opencode works.
   bb.events.on("experimental_thread.events", ({ thread }) => {
-    if (harnessOf(thread.providerId).reader !== "opencode-db") return;
+    if (!["opencode-db", "claude-log"].includes(harnessOf(thread.providerId).reader)) return;
     invalidate(thread.id);
     opts.onChange([thread.id]);
   });
@@ -316,7 +378,7 @@ export function createReportSource(
       });
       const factsInTime = await settlesBy(factsRun, until);
       // Nothing below awaits until every read is registered, so two callers never ask a host for the same thread.
-      const wanted = new Map<string, { hostId: string; harness: "pi" | "opencode"; threadIds: string[] }>();
+      const wanted = new Map<string, { hostId: string; harness: "pi" | "opencode" | "claude"; threadIds: string[] }>();
       for (const { threadId, hostId, providerId } of looked) {
         if (fresh(threadId)) continue;
         const reader = providerId === null ? null : harnessOf(providerId).reader;
@@ -330,7 +392,7 @@ export function createReportSource(
           continue;
         }
         if (hostId === null || hostDown(hostId)) continue;
-        const harness = reader === "opencode-db" ? "opencode" : "pi";
+        const harness = reader === "claude-log" ? "claude" : reader === "opencode-db" ? "opencode" : "pi";
         const key = `${hostId}:${harness}`;
         const group = wanted.get(key) ?? { hostId, harness, threadIds: [] };
         group.threadIds.push(threadId);
@@ -366,6 +428,19 @@ export function createReportSource(
         }
         const best = got ?? (await lastKept(threadId));
         if (best) out.set(threadId, best);
+        else if (facts.get(threadId)?.providerId === "claude-code") {
+          const fallback = await events.reportOf(threadId, "claude-code");
+          if (fallback)
+            out.set(threadId, {
+              ...fallback,
+              source: "events",
+              report: {
+                ...fallback.report,
+                coverage: "partial",
+                coverageNote: "Limited coverage: saved history is unavailable; some subagent usage and earlier turns may be missing.",
+              },
+            });
+        }
       });
       if (!factsInTime) {
         factsRun.then(

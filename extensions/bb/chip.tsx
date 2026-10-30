@@ -68,7 +68,7 @@ export function chipView(answer: UsageAnswer | null, opts: { now: number; fresh:
   let suffix: ChipView["suffix"] = null;
   if (stale) suffix = { kind: "age", text: `· ${formatAgo(reportedAt, opts.now)}` };
   else if (tone !== "default" && budget !== null) suffix = { kind: "budget", text: `/ ${formatBudget(budget)}` };
-  else if (opts.chipShows === "delta" && !tokenOnly && (running || opts.fresh)) suffix = { kind: "delta", text: formatDelta(report.lastTurnCost) };
+  else if (opts.chipShows === "delta" && !tokenOnly && (running || opts.fresh)) suffix = { kind: "delta", text: formatDelta(answer?.family.lastTurnCost ?? report.lastTurnCost) };
   const total = `${value}${tokenOnly ? " tok" : ""}`;
   const budgetNote = budget !== null && !tokenOnly ? ` of ${formatBudget(budget)}` : "";
   const estimate = report.estimated ? " Estimated from list prices." : "";
@@ -156,8 +156,9 @@ function BurnChip({ threadId, answer, placement }: { threadId: string; answer: U
   const prefs = readPrefs(useSettings().values);
   const navigate = useBbNavigate();
   const now = useNow(30_000);
-  const fresh = useFreshness(answer?.report?.cost.total ?? null);
+  const fresh = useFreshness(answer?.report ? answer.report.cost.total + (answer.family.total ?? 0) : null);
   const [open, setOpen] = useState(false);
+  const contentRef = useRef<HTMLDivElement>(null);
   const view = chipView(answer, { now, fresh: fresh !== null, chipShows: prefs.chipShows });
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -182,7 +183,19 @@ function BurnChip({ threadId, answer, placement }: { threadId: string; answer: U
           <ChipFace view={view} fresh={fresh} placement={placement} />
         </button>
       </PopoverTrigger>
-      <PopoverContent side={placement === "footer" ? "top" : "bottom"} align="end" className="w-[340px] p-0" aria-label="Burn: what this thread cost">
+      <PopoverContent
+        ref={contentRef}
+        side={placement === "footer" ? "top" : "bottom"}
+        align="end"
+        className="w-[340px] p-0"
+        aria-label="Burn: what this thread cost"
+        onOpenAutoFocus={(event) => {
+          // Start on the dialog, not the price button: its focus opens the calculation.
+          // Tab still reaches the price and exposes the tooltip intentionally.
+          event.preventDefault();
+          contentRef.current?.focus();
+        }}
+      >
         <BurnCard
           answer={answer}
           threadId={threadId}
@@ -209,7 +222,7 @@ function BurnChip({ threadId, answer, placement }: { threadId: string; answer: U
 export function BurnHeaderAction({ threadId, isCompactViewport }: PluginThreadHeaderActionProps): ReactNode {
   const prefs = readPrefs(useSettings().values);
   const navigate = useBbNavigate();
-  const { answer } = useUsage(threadId);
+  const { answer } = useUsage(threadId, { withChildren: true });
   const [anchor, setAnchor] = useState<HTMLSpanElement | null>(null);
   const mount = useFooterMount(prefs.chip ? anchor : null);
   useEffect(() => registerPanelOpener(threadId, (params) => openPanelIn(navigate, params)), [threadId, navigate]);

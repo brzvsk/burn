@@ -8,7 +8,8 @@ In bb, Burn counts every thread, whatever harness runs it.
 
 - **pi threads:** the figures come from pi's session logs, where every assistant message already carries the cost pi recorded.
 - **OpenCode threads:** the figures come from opencode's own database on the thread's machine, where every assistant message records its tokens and cost, including the calls of subagents that opencode's task tool starts.
-- **Other harnesses,** such as Codex and Claude Code: the figures come from the usage bb records for each thread, and Burn keeps its own copy of it.
+- **Claude Code threads:** a host reader reads the exact session identities and their recursive subagent transcript trees. Repeated content-block usage snapshots replace one another by API message ID. Logs replace event totals rather than being added to them.
+- **Other harnesses,** such as Codex: the figures come from the usage bb records for each thread, and Burn keeps its own copy of it.
 
 When a harness passes bb its own cost, Burn uses that cost as it is. Codex and Claude Code pass bb their tokens but no cost. Burn prices their tokens with pi's list prices for OpenAI Codex and Anthropic models, and marks every such amount as an estimate, for example `~$1.23`. A model without a known price shows tokens instead of dollars.
 
@@ -24,7 +25,7 @@ For OpenCode threads, the host entry opens `opencode.db` read-only. It is in `$X
 
 ## Reading the usage bb records
 
-The host entry reads pi's logs and opencode's database. Other harnesses need no host code. Their provider bridges, the adapters that connect an agent such as Codex to bb, already send bb a token-usage event after each model call or turn, and some send a running cost. bb tells the plugin within a second when a thread has new events, and the plugin reads them.
+The host entry reads pi's logs and opencode's database. Claude Code also uses the host entry to read its transcripts; other harnesses need no host code. Their provider bridges, the adapters that connect an agent such as Codex to bb, already send bb a token-usage event after each model call or turn, and some send a running cost. bb tells the plugin within a second when a thread has new events, and the plugin reads them.
 
 bb deletes older usage events and keeps only the latest one for each thread. So Burn keeps its own copy of what it read in the plugin's database, and the figures survive a plugin reload.
 
@@ -39,3 +40,5 @@ The figures still come from the session log. The report adds only what the log c
 The plugin's reply carries the thread's budget policy, so pi in a bb thread follows bb's budget settings. A thread budget set in bb takes precedence over one set with `/burn budget`. With the pi extension installed, pi stops a run at its budget from inside pi, which is faster than stopping it through bb.
 
 bb gives pi the address to report to only when it starts a pi session. So after you install the pi extension, a thread that was already running starts reporting only after it restarts. Its cost shows in bb either way, from the session log.
+
+See [Usage coverage and workflow accounting](usage-coverage.md) for source limits and the distinction between native subagents and BB workflow workers.

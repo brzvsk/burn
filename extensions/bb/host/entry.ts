@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import type { ExperimentalHostRpcContext, ExperimentalHostWatchEvent, ExperimentalHostWatchSubscription } from "@get-bb/plugin-sdk";
 import { experimental_defineHostEntry } from "@get-bb/plugin-sdk/host";
 import { CHANGED_MAX, hostContract, hostSignals } from "./contract.js";
+import { createClaudeSessions, claudeProjectsDir } from "./claude-sessions.js";
 import { createOpencodeDb, opencodeDbPath } from "./opencode-db.js";
 import { createPiSessions, sessionDir } from "./pi-sessions.js";
 
@@ -33,7 +34,8 @@ export async function realDir(dir: string): Promise<string> {
  * machine bb runs it on, and signals the server as soon as a pi log changes so
  * the chip updates live.
  */
-export function createHostEntry(opts: { dir: string; opencodeDb?: string; opencodeModels?: string; watchWaitMs?: number }) {
+export function createHostEntry(opts: { dir: string; opencodeDb?: string; opencodeModels?: string; watchWaitMs?: number; claudeDir?: string }) {
+  const claude = createClaudeSessions({ dir: opts.claudeDir ?? claudeProjectsDir() });
   const sessions = createPiSessions({ dir: opts.dir });
   const opencode = createOpencodeDb({ path: opts.opencodeDb ?? opencodeDbPath(), modelsPath: opts.opencodeModels });
   const watchWaitMs = opts.watchWaitMs ?? WATCH_WAIT_MS;
@@ -98,9 +100,11 @@ export function createHostEntry(opts: { dir: string; opencodeDb?: string; openco
       reports: async ({ harness, threads, timeZone }, context) => {
         if (harness === "pi") await ensureWatch(context);
         const reports = [];
-        for (const { threadId, sessionIds } of threads) {
+        for (const { threadId, sessionIds, since, parentSessionIds } of threads) {
           context.signal.throwIfAborted();
-          const got = harness === "opencode" ? await opencode.reportOf(sessionIds, timeZone) : await sessions.reportOf(sessionIds, timeZone);
+          const got = harness === "claude"
+              ? await claude.reportOf(sessionIds, timeZone, { since, parentSessionIds })
+              : harness === "opencode" ? await opencode.reportOf(sessionIds, timeZone) : await sessions.reportOf(sessionIds, timeZone);
           reports.push({ threadId, report: got?.report ?? null, at: got?.at ?? null });
         }
         return { dir: opts.dir, reports };

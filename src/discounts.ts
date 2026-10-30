@@ -56,6 +56,7 @@ export function applyDiscounts(report: UsageReport, d: Discounts): UsageReport {
     ...report,
     cost,
     lastTurnCost: scale(report.lastTurnCost),
+    ...(report.agents ? {agents: {...report.agents, rows: report.agents.rows.map(a => ({...a, cost: discountCost(a.cost, d)}))}} : {}),
     byModel: report.byModel.map((m) => ({ ...m, cost: scale(m.cost) })),
     series: report.series.map((s) => ({ ...s, cost: scale(s.cost) })),
     turns: report.turns.map((t) => ({ ...t, cost: scale(t.cost), callCosts: t.callCosts.map(scale) })),

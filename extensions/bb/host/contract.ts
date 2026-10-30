@@ -16,11 +16,18 @@ const threadId = z.string().regex(THREAD_ID);
 export const hostContract = defineRpcContract({
   reports: {
     input: z.object({
-      harness: z.enum(["pi", "opencode"]),
+      harness: z.enum(["pi", "opencode", "claude"]),
       /** The bb server's IANA zone, so `days` are its local days whatever the host's zone. */
       timeZone: z.string().max(100),
       threads: z
-        .array(z.object({ threadId, sessionIds: z.array(z.string().max(200)).max(32) }))
+        .array(
+          z.object({
+            threadId,
+            sessionIds: z.array(z.string().max(200)).max(32),
+            since: z.number().nonnegative().optional(),
+            parentSessionIds: z.array(z.string().max(200)).max(32).optional(),
+          }),
+        )
         .min(1)
         .max(HOST_BATCH),
     }),

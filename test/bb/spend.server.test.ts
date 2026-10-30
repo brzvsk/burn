@@ -752,3 +752,16 @@ describe("daily budget alert", () => {
     expect(await checkDailyBudget(s.deps)).toBeNull();
   });
 });
+
+it('propagates injected descendant failures without caching missing threads', async () => {
+  const s = await setup({reports:{thr_aaaaaa01:reportWith([day(0, 9)])},threads:{thr_aaaaaa01:{}}});
+  let failed = true;
+  const handlers = createSpendHandlers({...s.deps, descendantsOf:async ids => {
+    if (failed) throw new Error('listing unavailable');
+    return new Map(ids.map(id => [id, []]));
+  }});
+  await expect(handlers.spend({range:'7d',projectId:null})).rejects.toThrow('listing unavailable');
+  failed = false;
+  const got = await handlers.spend({range:'7d',projectId:null});
+  expect(JSON.stringify(got)).toContain('thr_aaaaaa01');
+});

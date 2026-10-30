@@ -465,3 +465,38 @@ describe("the chip's popover", () => {
     expect(card.getByText("Open details")).toBeTruthy();
   });
 });
+
+it("uses the server's family delta without changing the chip's own total", () => {
+ const a=answer();a.family.lastTurnCost=3.25;
+ const view=chipView(a,{now:Date.now(),fresh:true,chipShows:'delta'});
+ expect(view.suffix?.text).toBe('+$3.25');
+ expect(view.value).toBe('$4.82');
+});
+
+it("refreshes and animates the family delta when only a known child reports", async () => {
+ const current=answer();
+ current.family.children=[{threadId:'thr_child000',title:'Worker',cost:1,calls:1,running:false,model:null,estimated:false}];
+ current.family.total=5.82;
+ const server=backend(()=>current);
+ const slot=await renderChip(server);
+ const chip=await slot.findByRole('button',{name:/Thread cost/});
+ current.family={...current.family,total:6.82,lastTurnCost:2.31};
+ await slot.behavior.emitRealtime('usage',{threadId:'thr_child000'});
+ await vi.waitFor(()=>expect(chip.textContent).toContain('+$2.31'));
+ expect(server.callsTo('usage')).toHaveLength(2);
+});
+
+it("opens the own-thread calculation explicitly inside the chip popover", async () => {
+ const current = answer();
+ current.report!.agents={coverage:'available',rows:[{id:'native',calls:1,cost:{input:1,output:0,cacheRead:0,cacheWrite:0,total:1},estimated:false}]};
+ const slot = await renderChip(backend(()=>current));
+ const card = await openCard(slot);
+ const calculation = card.getByRole('button', {name:'Cost calculation'});
+ await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+ expect(card.queryByRole('tooltip')).toBeNull();
+ fireEvent.focus(calculation);
+ expect(card.getByRole('tooltip').textContent).toContain('This thread$4.82');
+ fireEvent.keyDown(calculation, {key:'Escape'});
+ expect(card.queryByRole('tooltip')).toBeNull();
+ expect(card.getByTestId('agents-line').textContent).not.toContain('children');
+});

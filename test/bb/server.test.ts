@@ -941,3 +941,16 @@ describe("discounts", () => {
     expect(cost.total).toBeCloseTo(3);
   });
 });
+
+it('sends one family native aggregate while retaining per-thread rows', async () => {
+ const s = await setup({descendants:{[THREAD]:[CHILD]}});
+ const agents = {coverage:'available' as const, rows:Array.from({length:120}, (_,i) => ({id:`native-${i}`,calls:1,cost:{input:1,output:0,cacheRead:0,cacheWrite:0,total:1},estimated:false}))};
+ await s.post(envelope(1, {...costOf(120),agents}));
+ await s.post(envelope(1, {...costOf(120),agents},CHILD));
+ const got = await s.usage();
+ expect(got.family.agents?.count).toBe(240);
+ expect(got.family.agents?.rows).toHaveLength(1);
+ expect(got.family.agents?.rows[0]).toMatchObject({id:'family-total',calls:240,cost:{total:240}});
+ expect(got.report?.agents?.rows).toHaveLength(120);
+ expect(got.family.children[0]?.agents?.rows).toHaveLength(120);
+});

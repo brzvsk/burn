@@ -180,3 +180,34 @@ describe("the Burn panel", () => {
     expect(slot.getByRole("note").textContent).toContain("Burn stopped a run at the $5 budget");
   });
 });
+
+it('shows native agents under their owning child without adding their spend twice', async () => {
+ const native={coverage:'available' as const,rows:[{id:'child-agent',calls:2,cost:{input:.4,output:0,cacheRead:0,cacheWrite:0,total:.4},estimated:false}]};
+ const family={...FAMILY,agents:native,children:FAMILY.children.map((child,i)=>({...child,...(i===0?{agents:native}:{})}))};
+ const slot=await renderPanel(backend(()=>answer({family})));
+ expect(slot.getByTestId('kpis').textContent).toContain('With agents$0.40');
+ expect(slot.getByTestId('agent-rows').textContent).toContain('$0.40 · of the thread total');
+ expect(slot.getByTestId('family-total').textContent).toBe('Total46 calls$6.64');
+});
+
+it("limits calculation triggers to the corresponding KPI amounts", async () => {
+ const current = answer({family:FAMILY});
+ current.report!.agents={coverage:'available',rows:[{id:'native',calls:1,cost:{input:1,output:0,cacheRead:0,cacheWrite:0,total:1},estimated:false}]};
+ const slot = await renderPanel(backend(() => current));
+ const own = slot.getByRole('button', {name:'Cost calculation'});
+ expect(own.textContent).toBe('$4.82');
+ expect(own.querySelector('div')).toBeNull();
+ fireEvent.focus(own);
+ const ownCalculation = slot.getByRole('tooltip').textContent;
+ expect(ownCalculation).toContain('This thread$4.82');
+ expect(ownCalculation).not.toMatch(/Child threads|Total with children|6.64/);
+ fireEvent.blur(own);
+ const family = slot.getByRole('button', {name:'Family cost calculation'});
+ expect(family.textContent).toBe('$6.64');
+ fireEvent.focus(family);
+ const familyCalculation = slot.getByRole('tooltip').textContent;
+ expect(familyCalculation).toContain('This thread$4.82');
+ expect(familyCalculation).toContain('Child threads · 2$1.82');
+ expect(familyCalculation).toContain('Total with children$6.64');
+ expect(familyCalculation).not.toMatch(/Main agent|Its subagents|known portion/);
+});

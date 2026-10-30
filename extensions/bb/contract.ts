@@ -1,6 +1,6 @@
 import { defineRpcContract } from "@get-bb/plugin-sdk";
 import { z } from "zod";
-import { policySchema, THREAD_ID, usageReportSchema } from "./schema.js";
+import { agentUsageSchema, policySchema, THREAD_ID, usageReportSchema } from "./schema.js";
 import { spendMethods } from "./spend/contract.js";
 
 const amount = z.number().finite().nonnegative();
@@ -16,6 +16,8 @@ export const effectiveBudgetSchema = z.object({
 const familySchema = z.object({
   /** This thread and every descendant that has reported. */
   total: amount,
+  lastTurnCost: amount.optional(),
+  agents: agentUsageSchema.optional(),
   calls: count,
   /** Some of the total is a list-price estimate. */
   estimated: z.boolean(),
@@ -24,6 +26,7 @@ const familySchema = z.object({
       threadId: z.string(),
       title: z.string(),
       cost: amount,
+      agents: agentUsageSchema.optional(),
       calls: count,
       running: z.boolean(),
       /** The child's costliest provider/model key. */

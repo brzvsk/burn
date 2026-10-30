@@ -27,7 +27,7 @@ const costOf = (total: number) => sampleReport({ cost: { input: total, output: 0
 type Thread = { host: string | null; provider?: string; status?: "active" | "idle" | "error"; sessions?: string[] };
 
 /** A source over fake threads; each host answers with `costs[threadId]`, or throws when listed in `offline`. */
-function setup(threads: Record<string, Thread>, opts: { offline?: string[]; directory?: boolean } = {}) {
+function setup(threads: Record<string, Thread>, opts: { offline?: string[]; directory?: boolean; coverageNote?: string } = {}) {
   const costs: Record<string, number> = {};
   const rows: EventRow[] = [];
   const calls: ExperimentalFakeHostRpcCall[] = [];
@@ -60,7 +60,12 @@ function setup(threads: Record<string, Thread>, opts: { offline?: string[]; dire
           const t = threads[threadId];
           if (getGate) await getGate;
           if (!t) throw new Error(`no thread ${threadId}`);
-          return makeThreadResponse({ id: threadId, providerId: t.provider ?? "pi", environmentId: t.host ? `env_${t.host}` : null, status: t.status ?? "idle" });
+          return makeThreadResponse({
+            id: threadId,
+            providerId: t.provider ?? "pi",
+            environmentId: t.host ? `env_${t.host}` : null,
+            status: t.status ?? "idle",
+          });
         },
         events: {
           list: async (args: Parameters<ReturnType<typeof listEvents>>[0]) =>
@@ -84,7 +89,13 @@ function setup(threads: Record<string, Thread>, opts: { offline?: string[]; dire
       return {
         dir: "/home/me/.bb/pi-bridge-sessions",
         reports: input.threads.map(({ threadId }) =>
-          threadId in costs ? { threadId, report: costOf(costs[threadId]!), at: 1000 * costs[threadId]! } : { threadId, report: null, at: null },
+          threadId in costs
+            ? {
+                threadId,
+                report: { ...costOf(costs[threadId]!), ...(opts.coverageNote ? { coverageNote: opts.coverageNote, coverage: "partial" } : {}) },
+                at: 1000 * costs[threadId]!,
+              }
+            : { threadId, report: null, at: null },
         ),
       };
     },
@@ -246,7 +257,10 @@ describe("createReportSource", () => {
     const release = s.hold();
     let got: Map<string, { report: { cost: { total: number } } }> | null = null;
     try {
-      got = await Promise.race([s.source.reportsOf([id(1), id(2)], { deadlineMs: 20 }), new Promise<null>((resolve) => setTimeout(() => resolve(null), 500))]);
+      got = await Promise.race([
+        s.source.reportsOf([id(1), id(2)], { deadlineMs: 20 }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 500)),
+      ]);
     } finally {
       release();
     }
@@ -265,7 +279,10 @@ describe("createReportSource", () => {
     try {
       await s.source.reportsOf([id(1)], { deadlineMs: 20 });
       const started = performance.now();
-      const joined = await Promise.race([s.source.reportsOf([id(1)], { deadlineMs: 2_000 }), new Promise<null>((resolve) => setTimeout(() => resolve(null), 500))]);
+      const joined = await Promise.race([
+        s.source.reportsOf([id(1)], { deadlineMs: 2_000 }),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), 500)),
+      ]);
       expect(joined?.get(id(1))?.report.cost.total).toBe(2);
       expect(performance.now() - started).toBeLessThan(200);
     } finally {
@@ -368,7 +385,10 @@ describe("createReportSource", () => {
       [id(1), "acp-opencode"],
       [id(2), "pi"],
     ]) {
-      await s.harness.behavior.emitThreadEvent("experimental_thread.events", { thread: makeThreadResponse({ id: threadId, providerId }), sequence: 1 });
+      await s.harness.behavior.emitThreadEvent("experimental_thread.events", {
+        thread: makeThreadResponse({ id: threadId, providerId }),
+        sequence: 1,
+      });
     }
     expect(s.changed).toEqual([[id(1)]]);
     expect(await s.cost(id(1))).toEqual([9]);
@@ -382,7 +402,10 @@ describe("createReportSource", () => {
     s.rows.push(requestEvent(id(1), "go", "gpt-5.5"), usageEvent(id(1), CODEX_1));
     expect(await s.cost(id(1))).toEqual([expect.closeTo(0.053, 9)]);
     s.rows.push(usageEvent(id(1), CODEX_1_2, CODEX_2));
-    await s.harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: id(1), providerId: "codex", status: "idle" }), lastAssistantText: null });
+    await s.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: id(1), providerId: "codex", status: "idle" }),
+      lastAssistantText: null,
+    });
     expect(s.changed).toEqual([[id(1)]]);
     expect(await s.cost(id(1))).toEqual([expect.closeTo(0.141, 9)]);
   });
@@ -397,9 +420,15 @@ describe("createReportSource", () => {
     threads[id(2)] = { host: A, status: "active" };
     await s.harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: id(2), providerId: "pi", status: "active" }) });
     expect(await s.source.running(id(2))).toBe(true);
-    await s.harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: id(2), providerId: "pi", status: "idle" }), lastAssistantText: null });
+    await s.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: id(2), providerId: "pi", status: "idle" }),
+      lastAssistantText: null,
+    });
     expect(await s.source.running(id(2))).toBe(false);
-    await s.harness.behavior.emitThreadEvent("thread.failed", { thread: makeThreadResponse({ id: id(1), providerId: "pi", status: "error" }), error: "boom" });
+    await s.harness.behavior.emitThreadEvent("thread.failed", {
+      thread: makeThreadResponse({ id: id(1), providerId: "pi", status: "error" }),
+      error: "boom",
+    });
     expect(await s.source.running(id(1))).toBe(false);
     await s.harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: id(3), providerId: "codex", status: "active" }) });
     expect(s.changed).toEqual([[id(2)], [id(2)], [id(1)], [id(3)]]);
@@ -410,7 +439,10 @@ describe("createReportSource", () => {
     const release = s.holdLookups();
     const asking = s.source.reportsOf([id(1)]);
     await vi.waitFor(() => expect(s.harness.inspection.sdk.callsTo("threads.get")).toHaveLength(1));
-    await s.harness.behavior.emitThreadEvent("thread.idle", { thread: makeThreadResponse({ id: id(1), providerId: "pi", status: "idle" }), lastAssistantText: null });
+    await s.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: id(1), providerId: "pi", status: "idle" }),
+      lastAssistantText: null,
+    });
     release();
     await asking;
     expect(await s.source.running(id(1))).toBe(false);
@@ -460,8 +492,13 @@ describe("createReportSource with the real host entry", () => {
       pluginId: "burn",
       sdk: {
         threads: {
-          get: async ({ threadId }: { threadId: string }) => makeThreadResponse({ id: threadId, providerId: "pi", environmentId: "env_1", status: "active" }),
-          events: { list: async ({ threadId }: { threadId: string }) => [{ type: "thread/identity", threadId, seq: 1, data: { providerThreadId: "pi_seven" } }] },
+          get: async ({ threadId }: { threadId: string }) =>
+            makeThreadResponse({ id: threadId, providerId: "pi", environmentId: "env_1", status: "active" }),
+          events: {
+            list: async ({ threadId }: { threadId: string }) => [
+              { type: "thread/identity", threadId, seq: 1, data: { providerThreadId: "pi_seven" } },
+            ],
+          },
         },
         environments: { get: async () => ({ id: "env_1", hostId: "host_1" }) },
       },
@@ -479,4 +516,40 @@ describe("createReportSource with the real host entry", () => {
     await host.experimental_dispose();
     await harness.lifecycle.dispose();
   });
+});
+
+describe("Claude transcript source selection", () => {
+  it("uses transcripts instead of adding their tokens to BB events", async () => {
+    const s = setup({ [id(1)]: { host: A, provider: "claude-code", sessions: ["session-a"] } });
+    s.costs[id(1)] = 7;
+    s.rows.push(requestEvent(id(1), "go", "claude-opus-5-5"), usageEvent(id(1), CODEX_1));
+    const got = (await s.source.reportsOf([id(1)])).get(id(1));
+    expect(got?.source).toBe("log");
+    expect(got?.report.cost.total).toBe(7);
+    expect(s.calls[0]?.input).toMatchObject({ harness: "claude", threads: [{ sessionIds: ["session-a", id(1)] }] });
+    await s.harness.lifecycle.dispose();
+  });
+  it("falls back to limited BB events when logs or host are unavailable", async () => {
+    const s = setup({ [id(1)]: { host: A, provider: "claude-code" } }, { offline: [A] });
+    s.rows.push(requestEvent(id(1), "go", "claude-opus-5-5"), usageEvent(id(1), CODEX_1));
+    const got = (await s.source.reportsOf([id(1)])).get(id(1));
+    expect(got?.source).toBe("events");
+    expect(got?.report.coverageNote).toContain("Limited coverage");
+    expect(got?.report.calls).toBe(1);
+    await s.harness.lifecycle.dispose();
+  });
+});
+
+it("preserves a saved Claude report when a later read has missing session identities", async () => {
+  const opts: { coverageNote?: string } = {};
+  const s = setup({ [id(1)]: { host: A, provider: "claude-code" } }, opts);
+  s.costs[id(1)] = 4;
+  expect(await s.cost(id(1))).toEqual([4]);
+  opts.coverageNote = "Partial Claude transcript history: missing session";
+  s.costs[id(1)] = 2;
+  s.tick(60_000);
+  const got = (await s.source.reportsOf([id(1)])).get(id(1));
+  expect(got?.report.cost.total).toBe(4);
+  expect(got?.report.coverageNote).toContain("last saved");
+  await s.harness.lifecycle.dispose();
 });

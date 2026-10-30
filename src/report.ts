@@ -78,7 +78,19 @@ export interface DayRow {
   aborted: number;
 }
 
+export interface AgentUsage {
+  /** Number of native agents when rows contains only a family aggregate. */
+  count?: number;
+  coverage: "available" | "partial";
+  rows: { id: string; calls: number; cost: CostParts; estimated: boolean }[];
+}
+
 export interface UsageReport {
+  /** Native agent spend is a subset of this report, never an additional charge. */
+  agents?: AgentUsage;
+  /** Limits of the available source, shown alongside its figures. */
+  coverageNote?: string;
+  coverage?: "available" | "partial";
   version: 2;
   startedAt: number;
   updatedAt: number;
@@ -111,7 +123,7 @@ export interface UsageReport {
 }
 
 /** Structural on purpose: pi's SessionEntry interfaces are assignable, and tests use plain objects. */
-export type EntryLike = { type: string; timestamp: string };
+export type EntryLike = { type: string; timestamp: string; agentId?: string };
 
 export const REPORT_VERSION = 2;
 export const SERIES_MAX = 60;
@@ -286,7 +298,7 @@ function slimUsage(usage: unknown): Usage | undefined {
  */
 export function slimEntry(entry: unknown): EntryLike | null {
   if (!isRecord(entry) || typeof entry.type !== "string" || typeof entry.timestamp !== "string" || entry.type === "session") return null;
-  const slim: Loose & EntryLike = { type: entry.type, timestamp: entry.timestamp };
+  const slim: Loose & EntryLike = { type: entry.type, timestamp: entry.timestamp, ...(typeof entry.agentId === "string" ? { agentId: entry.agentId } : {}) };
   const usage = slimUsage(entry.usage);
   if (usage) slim.usage = usage;
   if (entry.type === "usage") {
@@ -574,6 +586,13 @@ export function buildReport(
 
   const prompt = tokens.input + tokens.cacheRead + tokens.cacheWrite;
   return {
+    ...(entries.some(e => e.agentId) ? { agents: {
+      coverage: "partial" as const,
+      rows: [...new Set(entries.flatMap(e => e.agentId ? [e.agentId] : []))].map(id => {
+        const r = buildReport(entries.filter(e => e.agentId === id).map(({agentId, ...e}) => e), null, opts);
+        return { id, calls: r.calls, cost: r.cost, estimated: r.estimated };
+      }),
+    } } : {}),
     version: REPORT_VERSION,
     startedAt,
     updatedAt,
