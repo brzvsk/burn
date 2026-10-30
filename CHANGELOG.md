@@ -4,12 +4,14 @@ Notable changes to Burn, newest first.
 
 Burn follows [semantic versioning](https://semver.org). Releases from 0.4.0 on are tagged `vX.Y.Z` in this repository; earlier versions were not tagged. Each release's commit message has the full detail, including how the release was checked.
 
-## Unreleased
+## 0.9.1 - 2026-10-30
+
+The chip's working animation follows the thread again, and busy hosts stop piling up overlapping reads.
 
 - **The chip's working animation follows the thread again.** Burn takes a thread's working status from bb's thread events, and also from a list of every thread that it keeps for up to a minute. A list taken before the latest event could overwrite it. A thread that had just started then showed a still chip for its whole turn, and a thread that had just stopped kept its shimmer until it next ran. A status from the list now counts only if bb was asked for it after the thread's last event.
 - **Reads share a pass instead of piling up.** Burn no longer stacks overlapping cost, usage, budget and spend reads on a busy host ([#3](https://github.com/kalindudc/burn/issues/3)). A read already in flight answers identical calls instead of starting another pass, and a figure that changes during a pass invalidates it so a later call never receives the older totals. The sidebar, cost menu and overlay also wait for the refresh they started, and a usage signal that arrives meanwhile earns exactly one follow-up. The coalescing is bounded by the number of distinct requests, not the number of signals; the underlying per-pass work is unchanged, so a first read over a very large thread family can still take as long as before.
 
-The regression tests cover shared and separated keys, invalidation while a pass runs, rejection retry, and the read counts a burst produces. All 618 tests pass in 42 files and `tsc --noEmit` is clean.
+The regression tests cover both directions of the status race, and for the reads: shared and separated keys, invalidation while a pass runs, rejection retry, and the read counts a burst produces. All 618 tests pass in 42 files and `tsc --noEmit` is clean. Settings, stored keys and the plugin database's tables are the same as in 0.9.0.
 
 ## 0.9.0 - 2026-10-30
 
