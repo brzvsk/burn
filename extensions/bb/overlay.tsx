@@ -53,18 +53,40 @@ export function BurnOverlay(): ReactNode {
   const navigate = useBbNavigate();
   const latest = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // Signals arriving while a check runs leave a mark; the check that is running answers them with one more pass.
+  const flight = useRef<{ again: boolean } | null>(null);
+  const currentFlag = useRef(flagOverBudget);
+  currentFlag.current = flagOverBudget;
+  const mounted = useRef(true);
 
-  const refresh = useCallback(() => {
-    const asked = ++latest.current;
+  const refresh = useCallback(function run() {
     if (!flagOverBudget) {
+      latest.current++;
+      flight.current = null;
       setRowFlags(new Map());
       return;
     }
+    const under = flight.current;
+    if (under) {
+      under.again = true;
+      return;
+    }
+    const mine = { again: false };
+    flight.current = mine;
+    const asked = ++latest.current;
+    const done = (): void => {
+      if (flight.current === mine) flight.current = null;
+      if (mine.again && flight.current === null && mounted.current && currentFlag.current) run();
+    };
     rpc.call("overBudget", {}).then(
       ({ threads }) => {
         if (asked === latest.current) setRowFlags(new Map(threads.map((t) => [t.threadId, overBudgetStatus(t)])));
+        done();
       },
-      (cause: unknown) => console.warn(`Burn: checking which threads are over budget failed: ${errorText(cause)}`),
+      (cause: unknown) => {
+        console.warn(`Burn: checking which threads are over budget failed: ${errorText(cause)}`);
+        done();
+      },
     );
   }, [rpc, flagOverBudget]);
 
@@ -72,6 +94,8 @@ export function BurnOverlay(): ReactNode {
   useEffect(refresh, [refresh, threadBudget]);
   useEffect(
     () => () => {
+      mounted.current = false;
+      flight.current = null;
       clearTimeout(timer.current);
       latest.current++;
       setRowFlags(new Map());

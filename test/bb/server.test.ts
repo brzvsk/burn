@@ -697,6 +697,60 @@ describe("what each call reads", () => {
     expect(s.hostAsked()).toEqual([THREAD]);
   });
 
+  it("shares one read among identical calls already in flight", async () => {
+    const s = await setup({ logs: { [THREAD]: [user(), assistant(2)] } });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const release = s.hold();
+    const calls = [s.usage(), s.usage(), s.usage()];
+    try {
+      await settle();
+      expect(s.harness.sdk.callsTo("threads.experimental_listDescendants")).toHaveLength(1);
+      expect(s.hostAsked()).toEqual([THREAD]);
+    } finally {
+      release();
+    }
+    const answers = await Promise.all(calls);
+    expect(answers.map((answer) => answer.report?.cost.total)).toEqual([2, 2, 2]);
+
+    const beforeCosts = s.harness.sdk.callsTo("threads.experimental_listDescendants").length;
+    const costRelease = s.hold();
+    const costs = [
+      s.rpc<{ threads: { cost: number }[] }>("costs", { threadIds: [THREAD] }),
+      s.rpc<{ threads: { cost: number }[] }>("costs", { threadIds: [THREAD] }),
+    ];
+    try {
+      await settle();
+      expect(s.harness.sdk.callsTo("threads.experimental_listDescendants")).toHaveLength(beforeCosts + 1);
+    } finally {
+      costRelease();
+    }
+    expect((await Promise.all(costs)).map((cost) => cost.threads[0]?.cost)).toEqual([2, 2]);
+
+    const list = vi.spyOn(s.bb.storage.kv, "list");
+    await Promise.all([s.rpc("overBudget", {}), s.rpc("overBudget", {}), s.rpc("overBudget", {})]);
+    expect(list.mock.calls.filter(([prefix]) => String(prefix).startsWith("report:"))).toHaveLength(1);
+  });
+
+  it("starts a fresh read when figures change while an older read is in flight", async () => {
+    const s = await setup({ logs: { [THREAD]: [user(), assistant(2)] } });
+    const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+    const release = s.hold();
+    const before = s.usage();
+    try {
+      await settle();
+      expect(s.harness.sdk.callsTo("threads.experimental_listDescendants")).toHaveLength(1);
+      // Storing a report invalidates the pass already in flight for that thread.
+      await s.post(envelope(1, costOf(1)));
+      const after = s.usage();
+      await settle();
+      expect(s.harness.sdk.callsTo("threads.experimental_listDescendants")).toHaveLength(2);
+      release();
+      await Promise.all([before, after]);
+    } finally {
+      release();
+    }
+  });
+
   it("answers within a second from the last figures while a host is slow, and signals once the host answers", async () => {
     const s = await setup({ logs: { [THREAD]: [user(), assistant(2)] } });
     const cost = async () => (await s.rpc<{ threads: { cost: number }[] }>("costs", { threadIds: [THREAD] })).threads[0]?.cost;

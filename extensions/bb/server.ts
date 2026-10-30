@@ -16,6 +16,7 @@ import { discountsOf } from "./prefs.js";
 import { type Stored, storedSchema, usageEnvelopeSchema } from "./schema.js";
 import { createReportSource } from "./sources.js";
 import { withOwnedThreads, spawnedTurnCost } from "./family.js";
+import { coalesce } from "./coalesce.js";
 import { checkDailyBudget, createSpendHandlers, type SpendDeps } from "./spend/server.js";
 import { ensureUsageSecret, sameToken, usageToken } from "./usage-auth.js";
 
@@ -245,6 +246,8 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   const titles = new Map<string, { title: string | null; at: number }>();
   const observed = new Map<string, UsageReport>();
   const stops = new Map<string, number | null>();
+  // Assigned once the read handlers exist: a figure that changed must not be answered from a pass that started before it.
+  let readsChanged: (threadIds?: readonly string[]) => void = () => undefined;
   let observing: Promise<void> = Promise.resolve();
   let missingTokenWarned = false;
   let disposed = false;
@@ -265,6 +268,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     if (JSON.stringify(overrides) === JSON.stringify(priceOverrides)) return;
     priceOverrides = overrides;
     source.reprice();
+    readsChanged();
   });
   const loadedAt = Date.now();
 
@@ -521,6 +525,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       bb.log.warn(`saving the stop of ${threadId} failed: ${message(err)}`);
     }
     const title = (await titleOf(threadId)) ?? UNTITLED;
+    readsChanged([threadId]);
     bb.realtime.publish(ALERT_CHANNEL, alertFor({ kind: "stopped", stoppedAt: at, budget: policy.budget }, threadId, title, at));
   }
 
@@ -579,6 +584,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
 
   settings.onChange((next, prev) => {
     if (disposed || sameDiscounts(discountsOf(next), discountsOf(prev))) return;
+    readsChanged();
     bb.realtime.publish("usage", {});
     // Repriced spend is not new spend: a day it already puts over the daily budget is marked as alerted, silently.
     checkDailyBudget(spendDeps).catch((err: unknown) => bb.log.warn(`checking the daily budget after a discount change failed: ${message(err)}`));
@@ -604,13 +610,17 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
               }
             }
           }
-        } catch { bb.realtime.publish("usage", {}); }
-        if (!disposed) for (const threadId of about) bb.realtime.publish("usage", { threadId });
+        } catch { readsChanged(); bb.realtime.publish("usage", {}); }
+        if (!disposed) {
+          readsChanged([...about]);
+          for (const threadId of about) bb.realtime.publish("usage", { threadId });
+        }
       });
   }
 
-  bb.rpc.register(rpcContract, {
-    usage: async ({ threadId, listPrice }) => {
+  const usageRead = coalesce(
+    ({ threadId, listPrice }: { threadId: string; listPrice: boolean }) => `${threadId}:${listPrice}`,
+    async ({ threadId, listPrice }) => {
       const descendants = (await descendantsOf([threadId])).get(threadId) ?? [];
       const resolved = await resolveMany([threadId, ...descendants], undefined, listPrice ? "list" : "settings");
       const own = resolved.get(threadId) ?? null;
@@ -627,15 +637,10 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       }
       return { report, source: own?.source ?? null, reportedAt: own?.at ?? null, title, budget, policy, family };
     },
-    setBudget: async ({ threadId, budget }) => {
-      if (budget === "default") await bb.storage.kv.delete(budgetKey(threadId));
-      else await bb.storage.kv.set(budgetKey(threadId), { budget });
-      remember(budgets, threadId, budget === "default" ? undefined : budget);
-      bb.realtime.publish("usage", { threadId });
-      const report = (await resolve(threadId))?.report ?? null;
-      return { budget: await budgetOf(threadId, report), policy: await policyOf(threadId) };
-    },
-    costs: async ({ threadIds }) => {
+  );
+  const costsRead = coalesce(
+    ({ threadIds }: { threadIds: string[] }) => JSON.stringify(threadIds),
+    async ({ threadIds }) => {
       const [descendants, values] = await Promise.all([descendantsOf(threadIds), settings.get()]);
       const resolved = await resolveMany([...threadIds, ...[...descendants.values()].flat()]);
       return {
@@ -644,7 +649,10 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
         ),
       };
     },
-    overBudget: async () => {
+  );
+  const overBudgetRead = coalesce(
+    () => "all",
+    async () => {
       // The sidebar shows no archived thread, so none is read for its flag.
       const ids = await threadsWhere((t) => t.archivedAt === null);
       const [resolved, values] = await Promise.all([resolveMany(ids), settings.get()]);
@@ -659,7 +667,41 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       );
       return { threads: rows.filter((r) => r !== null) };
     },
-    ...createSpendHandlers(spendDeps),
+  );
+  const spendHandlers = createSpendHandlers(spendDeps);
+  const spendRead = coalesce((input) => JSON.stringify(input), spendHandlers.spend);
+  readsChanged = (threadIds) => {
+    if (threadIds === undefined) {
+      usageRead.invalidate();
+      costsRead.invalidate();
+      overBudgetRead.invalidate();
+      spendRead.invalidate();
+      return;
+    }
+    if (threadIds.length === 0) return;
+    usageRead.invalidate((key) => threadIds.some((id) => key.startsWith(`${id}:`)));
+    // A cost row includes the thread's family, so a change in any family member can move it.
+    costsRead.invalidate();
+    overBudgetRead.invalidate();
+    spendRead.invalidate();
+  };
+
+  bb.rpc.register(rpcContract, {
+    // A burst of usage signals for one thread (or its children) must not start a family read per signal.
+    usage: usageRead,
+    setBudget: async ({ threadId, budget }) => {
+      if (budget === "default") await bb.storage.kv.delete(budgetKey(threadId));
+      else await bb.storage.kv.set(budgetKey(threadId), { budget });
+      remember(budgets, threadId, budget === "default" ? undefined : budget);
+      readsChanged([threadId]);
+      bb.realtime.publish("usage", { threadId });
+      const report = (await resolve(threadId))?.report ?? null;
+      return { budget: await budgetOf(threadId, report), policy: await policyOf(threadId) };
+    },
+    costs: costsRead,
+    overBudget: overBudgetRead,
+    ...spendHandlers,
+    spend: spendRead,
   });
 
   // The Burn pi extension reports each change here (extensions/pi/bb-report.ts) and applies the policy in the reply.
@@ -698,6 +740,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     } catch (err) {
       bb.log.warn(`saving the usage report of ${threadId} failed: ${message(err)}`);
     }
+    readsChanged([threadId]);
     bb.realtime.publish("usage", { threadId });
     // After the reply, so a slow look at the thread never delays pi.
     observe([threadId], { threadId, stored }).catch((err: unknown) => {
@@ -723,6 +766,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
   for (const name of ["thread.archived", "thread.unarchived"] as const) {
     bb.events.on(name, () => {
       directory.refresh();
+      readsChanged();
     });
   }
 
@@ -738,6 +782,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     } catch (err) {
       bb.log.warn(`forgetting the usage report of ${thread.id} failed: ${message(err)}`);
     }
+    readsChanged([thread.id]);
   });
 
   // Read the details of the threads the Burn page is most likely to ask about, so its first open

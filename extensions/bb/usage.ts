@@ -40,18 +40,39 @@ export function useUsage(
   const [error, setError] = useState<string | null>(null);
   const latest = useRef(0);
   const children = useRef<ReadonlySet<string>>(new Set());
+  // A burst of signals for one thread joins the read under way, then reads once more for anything that arrived meanwhile.
+  const flights = useRef(new Map<string, { again: boolean }>());
+  // A flight that settles after a switch must not read the thread it started on again.
+  const current = useRef(key);
+  current.current = key;
+  const mounted = useRef(true);
 
-  const refetch = useCallback(() => {
+  const refetch = useCallback(function run() {
+    const key = `${threadId}:${listPrice}`;
+    const under = flights.current.get(key);
+    if (under) {
+      under.again = true;
+      return;
+    }
+    const flight = { again: false };
+    flights.current.set(key, flight);
     const asked = ++latest.current;
+    const done = (): void => {
+      flights.current.delete(key);
+      if (flight.again && mounted.current && current.current === key) run();
+    };
     rpc.call("usage", listPrice ? { threadId, listPrice: true } : { threadId }).then(
       (next) => {
-        if (asked !== latest.current) return;
-        children.current = new Set(next.family.children.map((c) => c.threadId));
-        setHeld({ key: `${threadId}:${listPrice}`, answer: next });
-        setError(null);
+        if (asked === latest.current) {
+          children.current = new Set(next.family.children.map((c) => c.threadId));
+          setHeld({ key, answer: next });
+          setError(null);
+        }
+        done();
       },
       (cause: unknown) => {
         if (asked === latest.current) setError(errorText(cause));
+        done();
       },
     );
   }, [rpc, threadId, listPrice]);
@@ -60,6 +81,14 @@ export function useUsage(
     setHeld(null);
     refetch();
   }, [refetch]);
+  useEffect(
+    () => () => {
+      mounted.current = false;
+      latest.current++;
+      flights.current.clear();
+    },
+    [],
+  );
   const withChildren = opts.withChildren === true;
   useRealtime(
     "usage",
