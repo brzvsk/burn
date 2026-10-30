@@ -127,8 +127,8 @@ export function createReportSource(
   const events = createEventReader(bb, { onChange: opts.onChange, now, overrides: opts.overrides });
   const facts = new Map<string, Facts>();
   const statuses = new Map<string, string>();
-  // Thread events seen per thread, so a lookup that an event overtook does not undo it.
-  const heard = new Map<string, number>();
+  // When a thread event last set each thread's status, so a lookup answered from before it does not undo it.
+  const heardAt = new Map<string, number>();
   const reports = new Map<string, { got: LogReport | null; checkedAt: number }>();
   const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const retryAttempts = new Map<string, number>();
@@ -152,6 +152,8 @@ export function createReportSource(
     hostId: string | null;
     /** Whether `hostId` is already known, so the fallback path does not ask again. */
     hostKnown: boolean;
+    /** When bb was asked: a shared listing can be up to a minute older than the lookup. */
+    listedAt: number;
   }
 
   async function lookup(threadId: string): Promise<Looked | null> {
@@ -165,12 +167,15 @@ export function createReportSource(
             environmentId: row.environmentId,
             hostId: row.hostId,
             hostKnown: true,
+            listedAt: row.listedAt,
             sourceThreadId: row.sourceThreadId,
             since: row.sourceThreadId ? row.createdAt : undefined,
           };
     }
+    const listedAt = now();
     const thread = await bb.sdk.threads.get({ threadId });
     return {
+      listedAt,
       status: thread.status,
       providerId: thread.providerId,
       environmentId: thread.environmentId,
@@ -182,13 +187,14 @@ export function createReportSource(
   }
 
   async function lookUp(threadId: string): Promise<Facts> {
-    const before = heard.get(threadId) ?? 0;
+    const asked = now();
     const row = await lookup(threadId);
+    const newer = (listedAt: number) => listedAt > (heardAt.get(threadId) ?? Number.NEGATIVE_INFINITY);
     if (row === null) {
-      if ((heard.get(threadId) ?? 0) === before) remember(statuses, threadId, "deleted");
+      if (newer(asked)) remember(statuses, threadId, "deleted");
       return { at: now(), hostId: null, providerId: null, sessionIds: [], stems: new Set() };
     }
-    if ((heard.get(threadId) ?? 0) === before) remember(statuses, threadId, row.status);
+    if (newer(row.listedAt)) remember(statuses, threadId, row.status);
     const reader = harnessOf(row.providerId).reader;
     if ((reader !== "pi-log" && reader !== "opencode-db" && reader !== "claude-log") || row.environmentId === null) {
       return { at: now(), hostId: null, providerId: row.providerId, sessionIds: [], stems: new Set() };
@@ -383,7 +389,7 @@ export function createReportSource(
   });
 
   function hear(thread: { id: string; status: string }): void {
-    remember(heard, thread.id, (heard.get(thread.id) ?? 0) + 1);
+    remember(heardAt, thread.id, now());
     remember(statuses, thread.id, thread.status);
   }
 
@@ -556,7 +562,7 @@ export function createReportSource(
         retryTimers.delete(threadId);
       }
       retryAttempts.delete(threadId);
-      for (const map of [facts, statuses, heard, reports, versions, saved, reading, looking]) map.delete(threadId);
+      for (const map of [facts, statuses, heardAt, reports, versions, saved, reading, looking]) map.delete(threadId);
       await events.forget(threadId);
     },
     dispose() {

@@ -491,6 +491,42 @@ describe("createReportSource", () => {
     expect(await s.source.running(id(1))).toBe(false);
   });
 
+  it("keeps the status a thread event set over a thread listing taken before it", async () => {
+    const threads: Record<string, Thread> = { [id(1)]: { host: A }, [id(2)]: { host: A, status: "active" }, [id(3)]: { host: A } };
+    const s = setup(threads, { directory: true });
+    await s.source.reportsOf([id(1), id(2)]);
+    // Another read lists every thread again just before id(1) starts, and id(1)'s own report has expired.
+    s.tick(61_000);
+    await s.source.reportsOf([id(3)]);
+    threads[id(1)] = { host: A, status: "active" };
+    s.tick(1000);
+    await s.harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: id(1), providerId: "pi", status: "active" }) });
+    await s.source.reportsOf([id(1)]);
+    expect(await s.source.running(id(1))).toBe(true);
+
+    // Another read lists every thread again while id(2) still works; its own details expire just after it stops.
+    s.tick(4.5 * 60_000);
+    await s.source.reportsOf([id(3)]);
+    threads[id(2)] = { host: A, status: "idle" };
+    s.tick(10_000);
+    await s.harness.behavior.emitThreadEvent("thread.idle", {
+      thread: makeThreadResponse({ id: id(2), providerId: "pi", status: "idle" }),
+      lastAssistantText: null,
+    });
+    s.tick(30_000);
+    await s.source.reportsOf([id(2)]);
+    expect(await s.source.running(id(2))).toBe(false);
+  });
+
+  it("takes a thread's status from a listing taken after the last thread event", async () => {
+    const threads: Record<string, Thread> = { [id(1)]: { host: A } };
+    const s = setup(threads, { directory: true });
+    await s.harness.behavior.emitThreadEvent("thread.active", { thread: makeThreadResponse({ id: id(1), providerId: "pi", status: "active" }) });
+    s.tick(10 * 60_000);
+    await s.source.reportsOf([id(1)]);
+    expect(await s.source.running(id(1))).toBe(false);
+  });
+
   it("names the threads whose details arrived after the deadline, so the page can fill them in", async () => {
     const s = setup({ [id(1)]: { host: A }, [id(2)]: { host: A } });
     const release = s.holdLookups();

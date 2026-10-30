@@ -4,6 +4,10 @@ Notable changes to Burn, newest first.
 
 Burn follows [semantic versioning](https://semver.org). Releases from 0.4.0 on are tagged `vX.Y.Z` in this repository; earlier versions were not tagged. Each release's commit message has the full detail, including how the release was checked.
 
+## Unreleased
+
+- **The chip's working animation follows the thread again.** Burn takes a thread's working status from bb's thread events, and also from a list of every thread that it keeps for up to a minute. A list taken before the latest event could overwrite it. A thread that had just started then showed a still chip for its whole turn, and a thread that had just stopped kept its shimmer until it next ran. A status from the list now counts only if bb was asked for it after the thread's last event.
+
 ## 0.9.0 - 2026-10-30
 
 Subagent spend is counted correctly and shown in the existing Burn views, and the readers, storage and report endpoint are hardened after an audit. Native-agent support is by [Artur Karapetyan](https://github.com/architawr) ([#2](https://github.com/kalindudc/burn/pull/2)).

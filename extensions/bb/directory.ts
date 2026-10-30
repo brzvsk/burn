@@ -18,6 +18,8 @@ export interface ThreadRow {
   status: string;
   updatedAt: number;
   archivedAt: number | null;
+  /** When bb was asked for this row, so a thread event heard since can outrank its status. */
+  listedAt: number;
   parentThreadId?: string | null;
   sourceThreadId?: string | null;
   createdAt?: number;
@@ -42,8 +44,9 @@ const TTL_MS = 60_000;
 /** One row of a `threads.list` page, as far as Burn reads it. */
 type ListedRow = Awaited<ReturnType<BbPluginApi["sdk"]["threads"]["list"]>>[number];
 
-const toRow = (t: ListedRow): ThreadRow => ({
+const toRow = (t: ListedRow, listedAt: number): ThreadRow => ({
   id: t.id,
+  listedAt,
   parentThreadId: t.parentThreadId,
   sourceThreadId: t.sourceThreadId,
   createdAt: t.createdAt,
@@ -87,9 +90,10 @@ export function createThreadDirectory(bb: BbPluginApi, opts: { now?: () => numbe
     const mine = generation;
     const taking = (async () => {
       const rows: ThreadRow[] = [];
+      const listedAt = now();
       for (let page = 0; page < PAGES_MAX; page++) {
         const got = await bb.sdk.threads.list({ includeHidden: true, limit: PAGE, offset: page * PAGE });
-        for (const t of got) if (t.deletedAt === null) rows.push(toRow(t));
+        for (const t of got) if (t.deletedAt === null) rows.push(toRow(t, listedAt));
         if (got.length < PAGE) break;
       }
       const found: Listing = { at: now(), rows, byId: new Map(rows.map((r) => [r.id, r])) };
@@ -110,12 +114,14 @@ export function createThreadDirectory(bb: BbPluginApi, opts: { now?: () => numbe
     if (under) return under;
     const run = (async (): Promise<ThreadRow | null> => {
       try {
+        const listedAt = now();
         const t = await bb.sdk.threads.get({ threadId });
         if (t.deletedAt !== null) return null;
         let hostId: string | null = null;
         if (t.environmentId !== null) hostId = (await bb.sdk.environments.get({ environmentId: t.environmentId })).hostId;
         return {
           id: t.id,
+          listedAt,
           parentThreadId: t.parentThreadId,
           sourceThreadId: t.sourceThreadId,
           createdAt: t.createdAt,
