@@ -22,6 +22,8 @@ export type LedgerRecord =
 
 export interface SessionState {
   total: Totals | null;
+  /** Older counters under the same provider id, newest first: a native child's counter can share its parent's id. */
+  earlier?: Totals[];
   /** The session's latest cumulative cost in dollars. */
   usd: number | null;
   /** The harness recorded a cost for the session, so its tokens are never priced. */
@@ -72,15 +74,30 @@ function minus(a: Totals, b: Totals): Totals {
 const sessionOf = (state: LedgerState, id: string): SessionState =>
   (Object.hasOwn(state.sessions, id) ? state.sessions[id] : undefined) ?? { total: null, usd: null, costed: false };
 
+/** Counters one provider id keeps at once; the oldest drops past this. */
+const COUNTERS = 8;
+
+/** A session's counters, newest first: its total, then the earlier ones. */
+const countersOf = (session: SessionState): Totals[] => (session.total === null ? [] : [session.total, ...(session.earlier ?? [])]);
+
 /**
- * What a session's new total adds. Bridges that sum `last` in worker memory
- * start again from zero when the worker restarts, so a lower total, or one equal
- * to its own last call after a larger one, counts in full.
+ * What a provider id's new total adds, and the counters it leaves. A total that
+ * continues a counter adds what that counter gained: its total plus this call's
+ * tokens is the new total. This holds per counter, so a native child's calls under
+ * the parent's id do not count the parent's total again. Otherwise the total is a
+ * restart: bridges that sum `last` in worker memory start again from zero when the
+ * worker restarts, so a lower total, or one equal to its own last call, counts in full.
  */
-function addedBy(prev: Totals | null, total: Totals, last: Totals): Totals {
-  if (prev === null) return total;
-  const restarted = total.totalTokens < prev.totalTokens || (prev.totalTokens > 0 && same(total, last) && !same(total, prev));
-  return restarted ? total : minus(total, prev);
+function addedBy(counters: readonly Totals[], total: Totals, last: Totals): { added: Totals; counters: Totals[] } {
+  const index = counters.findIndex((c) => c.totalTokens + last.totalTokens === total.totalTokens);
+  if (index >= 0) return { added: minus(total, counters[index] as Totals), counters: [total, ...counters.filter((_, i) => i !== index)] };
+  // Only the newest counter's exact total is a repeat: an older counter can share a total with a real call.
+  const newest = counters[0];
+  if (newest === undefined || (newest.totalTokens > 0 && same(total, last) && !same(total, newest)) || total.totalTokens < newest.totalTokens) {
+    return { added: total, counters: [total, ...counters].slice(0, COUNTERS) };
+  }
+  // No counter continues, so calls were missed on the newest one: count its growth. A repeat of it adds nothing.
+  return { added: minus(total, newest), counters: [total, ...counters.slice(1)] };
 }
 
 /** bb's token counts as Burn's kinds. Reasoning is shown, never priced: it is part of output. */
@@ -123,8 +140,8 @@ function fold(state: LedgerState, row: EventRow, harness: Harness, out: LedgerRe
       const child = row.scope.kind === "turn" ? state.childTurns?.[row.scope.turnId] : undefined;
       const id = child ? `${providerThreadId}:child:${child}` : providerThreadId;
       const session = sessionOf(state, id);
-      const added = addedBy(session.total, tokenUsage.total, tokenUsage.last);
-      state.sessions[id] = { ...session, total: tokenUsage.total };
+      const { added, counters } = addedBy(countersOf(session), tokenUsage.total, tokenUsage.last);
+      state.sessions[id] = { ...session, total: tokenUsage.total, earlier: counters.slice(1) };
       if (isZero(added)) return false;
       out.push({
         kind: "tokens",
