@@ -749,7 +749,8 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
     return c.json({ ok: true, policy } satisfies UsageReply);
   });
 
-  bb.providers.experimental_contributeEnv("pi", (context) => [
+  // bb also asks outside a thread (threadId null); there is no thread to report for then.
+  bb.providers.experimental_contributeEnv("pi", (context) => context.threadId ? [
     {
       name: "BURN_BB_URL",
       value: { serverPath: `/api/v1/plugins/${bb.pluginId}/http/usage` },
@@ -760,7 +761,7 @@ export default async function plugin(bb: BbPluginApi): Promise<void> {
       value: usageToken(usageSecret, context.threadId),
       reason: "Proof that this pi session reports for its own thread, minted by the Burn plugin",
     },
-  ]);
+  ] : []);
 
   // A thread moving in or out of the archive moves in or out of the sidebar's flags.
   for (const name of ["thread.archived", "thread.unarchived"] as const) {

@@ -354,6 +354,14 @@ describe("POST /usage", () => {
     expect(other[1]?.value).not.toBe(entries[1]?.value);
   });
 
+  it("contributes no pi env when bb asks outside a thread", async () => {
+    const s = await setup();
+    const entries = await s.harness.behavior.resolveProviderEnv("pi", { threadId: null as unknown as string, projectId: "proj_1", hostId: "host_1" });
+    expect(entries).toEqual([]);
+    // The harness turns a throwing contribution into [] plus a warning; there must be no warning.
+    expect(s.harness.inspection.logEntries.some((e) => e.message.includes("provider environment contribution failed"))).toBe(false);
+  });
+
   it("forgets a deleted thread's report, budget, log copy and stop", async () => {
     const s = await setup({ logs: { [THREAD]: [user(), assistant(1)] } });
     await s.post(envelope(1));
